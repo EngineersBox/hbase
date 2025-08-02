@@ -31,9 +31,26 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import com.engineersbox.kairos.DataBrokerBootstrapFn;
+import com.engineersbox.kairos.DataBrokerPlugin;
+import com.engineersbox.kairos.DataPublisherBox;
+import com.engineersbox.kairos.DataSubscriberBox;
+import com.engineersbox.kairos.FFIKairosDylib;
+import com.engineersbox.kairos.Kairos;
+import com.engineersbox.kairos.OptionalGenericError;
+import com.engineersbox.kairos.SliceU8;
+import com.engineersbox.kairos.Task;
+import com.engineersbox.kairos.TaskRunnable;
+import com.engineersbox.kairos.TaskRunnableContainer;
+import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.OptionalUtils;
+import com.engineersbox.kairos.utils.SliceUtils;
+import com.engineersbox.kairos.utils.TaskUtils;
 import org.apache.hadoop.hbase.monitoring.ThreadMonitoring;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.yetus.audience.InterfaceAudience;
+import org.bytedeco.javacpp.BytePointer;
+import org.bytedeco.javacpp.Pointer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -332,6 +349,125 @@ public class ExecutorService {
      */
     public ConcurrentMap<Thread, Runnable> getRunningTasks() {
       return running;
+    }
+  }
+
+  public class ScheduledExecutor implements AutoCloseable {
+
+    public static final String DATA_BROKER_NAME = "<TODO>";
+    private static final AtomicLong SEQ_IDS = new AtomicLong(0);
+
+    private final ExecutorConfig config;
+    private final long id;
+    private final TransparentPointerScope scope;
+    private final ConcurrentMap<String, DataPublisherBox> publishers;
+    // TODO: Creating/destroying a Kairos instance per-executor is very
+    //       expensive and time consuming, especially if these are created
+    //       ad-hoc and not ahead of time. Instead, we should support
+    //       multiple schedulers per-kairos instance and share data brokers
+    //       between them. Dynamic library loading should attempt to re-use
+    //       already loaded/cached libs before trying to load it again.
+    private final BytePointer kairos;
+
+    public ScheduledExecutor(final ExecutorConfig config, final String schedulerLibName) {
+      this.config = config;
+      this.id = SEQ_IDS.incrementAndGet();
+      this.scope = new TransparentPointerScope();
+      this.publishers = new ConcurrentHashMap<>();
+      this.kairos = scope.attachTransparent(Kairos.kairos_new());
+      if (this.kairos == null || this.kairos.isNull()) {
+        throw new IllegalStateException("Failed to initialise Kairos instance");
+      }
+      registerBrokers();
+      initScheduler(schedulerLibName);
+    }
+
+    private void registerBrokers() {
+      final FFIKairosDylib brokerDylib = this.scope.attachTransparent(new FFIKairosDylib());
+      brokerDylib.lib_type(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
+      final BytePointer libName = this.scope.attachTransparent(new BytePointer(DATA_BROKER_NAME));
+      brokerDylib.name(libName);
+      brokerDylib.name_len(libName.getStringBytes().length);
+      final DataBrokerBootstrapFn bootstrapFn = this.scope.attachTransparent(new DataBrokerBootstrapFn() {
+        @Override
+        public OptionalGenericError call(final DataBrokerPlugin plugin) {
+          final DataPublisherBox publisher = ScheduledExecutor.this.scope.attachTransparent(new DataPublisherBox());
+          final SliceU8 topic = SliceUtils.fromString(ScheduledExecutor.this.toString(), ScheduledExecutor.this.scope);
+          final int result = plugin.vtbl_databroker().produce().call(
+            plugin.container(),
+            topic,
+            publisher
+          );
+          if (result == Kairos.GenericError.Failed.value) {
+            return OptionalUtils.some(Kairos.GenericError.Failed, ScheduledExecutor.this.scope);
+          }
+          ScheduledExecutor.this.publishers.put(
+            ScheduledExecutor.DATA_BROKER_NAME,
+            publisher
+          );
+          return OptionalUtils.none(ScheduledExecutor.this.scope);
+        }
+      });
+      final Kairos.FFIKairosResult result = Kairos.kairos_register_data_broker_dylib(
+        this.kairos,
+        brokerDylib,
+        Kairos.new_dummy_logger_drain(),
+        bootstrapFn
+      ).intern();
+      if (result != Kairos.FFIKairosResult.KAIROS_SUCCESS) {
+        throw new IllegalStateException("Failed to register data broker: " + result.name());
+      }
+    }
+
+    private void initScheduler(final String schedulerLibName) {
+      final FFIKairosDylib schedulerDylib = this.scope.attachTransparent(new FFIKairosDylib());
+      schedulerDylib.lib_type(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
+      final BytePointer libName = this.scope.attachTransparent(new BytePointer(schedulerLibName));
+      schedulerDylib.name(libName);
+      schedulerDylib.name_len(libName.getStringBytes().length);
+      final Kairos.FFIKairosResult result = Kairos.kairos_run_with_scheduler_dylib(
+        this.kairos,
+        schedulerDylib,
+        null,
+        Kairos.new_dummy_logger_drain()
+      ).intern();
+      if (result != Kairos.FFIKairosResult.KAIROS_SUCCESS) {
+        throw new IllegalStateException("Failed to run scheduler: " + result.name());
+      }
+    }
+
+    public void submit(final EventHandler event) {
+      final TaskRunnable task = new TaskRunnable() {
+        @Override
+        public void run(final TaskRunnableContainer cont, final Pointer context) {
+          event.run();
+        }
+      };
+      final Kairos.FFIKairosResult result = Kairos.kairos_submit(
+        this.kairos, TaskUtils.create(
+          0,
+          null,
+          task,
+          this.scope
+        )
+      ).intern();
+      if (result != Kairos.FFIKairosResult.KAIROS_SUCCESS) {
+        throw new IllegalStateException("Failed to submit task: " + result.name());
+      }
+    }
+
+    @Override
+    public String toString() {
+      return "%s-%d-%s".formatted(
+        getClass().getSimpleName(),
+        this.id,
+        this.config.getName()
+      );
+    }
+
+    @Override
+    public void close() throws Exception {
+      this.scope.close();
     }
   }
 

@@ -1084,6 +1084,11 @@
   <!-- Sorted by groups of dependencies then groupId and artifactId -->
   <dependencyManagement>
     <dependencies>
+      <dependency>
+        <groupId>com.engineersbox</groupId>
+        <artifactId>kairos-platform</artifactId>
+        <version>0.1.0</version>
+      </dependency>
       <!--
       Note: There are a few exclusions to prevent duplicate code in different jars to be included:
           org.mortbay.jetty:servlet-api, javax.servlet:servlet-api: These are excluded because they are
