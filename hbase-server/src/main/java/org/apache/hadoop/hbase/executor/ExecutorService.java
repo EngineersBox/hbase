@@ -34,12 +34,10 @@ import java.util.concurrent.atomic.AtomicLong;
 import com.engineersbox.kairos.DataBrokerBootstrapFn;
 import com.engineersbox.kairos.DataBrokerPlugin;
 import com.engineersbox.kairos.DataPublisherBox;
-import com.engineersbox.kairos.DataSubscriberBox;
-import com.engineersbox.kairos.FFIKairosDylib;
+import com.engineersbox.kairos.DylibSpecifier;
 import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.OptionalGenericError;
 import com.engineersbox.kairos.SliceU8;
-import com.engineersbox.kairos.Task;
 import com.engineersbox.kairos.TaskRunnable;
 import com.engineersbox.kairos.TaskRunnableContainer;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
@@ -76,6 +74,27 @@ import org.apache.hbase.thirdparty.com.google.common.util.concurrent.ThreadFacto
 @InterfaceAudience.Private
 public class ExecutorService {
   private static final Logger LOG = LoggerFactory.getLogger(ExecutorService.class);
+  private static final BytePointer KAIROS;
+
+  static {
+    KAIROS = Kairos.kairos_new();
+    if (KAIROS == null || KAIROS.isNull()) {
+      throw new IllegalStateException("Failed to initialise Kairos");
+    }
+    Runtime.getRuntime().addShutdownHook(new Thread() {
+      @Override
+      public void run() {
+        try {
+          final Kairos.FFIKairosResult result = Kairos.kairos_free(KAIROS).intern();
+          if (result != Kairos.FFIKairosResult.KAIROS_SUCCESS) {
+            throw new IllegalStateException("Failed to destroy Kairos: " + result);
+          }
+        } finally {
+          KAIROS.deallocate();
+        }
+      }
+    });
+  }
 
   // hold the all the executors created in a map addressable by their names
   private final ConcurrentMap<String, Executor> executorMap = new ConcurrentHashMap<>();
@@ -361,33 +380,20 @@ public class ExecutorService {
     private final long id;
     private final TransparentPointerScope scope;
     private final ConcurrentMap<String, DataPublisherBox> publishers;
-    // TODO: Creating/destroying a Kairos instance per-executor is very
-    //       expensive and time consuming, especially if these are created
-    //       ad-hoc and not ahead of time. Instead, we should support
-    //       multiple schedulers per-kairos instance and share data brokers
-    //       between them. Dynamic library loading should attempt to re-use
-    //       already loaded/cached libs before trying to load it again.
-    private final BytePointer kairos;
 
     public ScheduledExecutor(final ExecutorConfig config, final String schedulerLibName) {
       this.config = config;
       this.id = SEQ_IDS.incrementAndGet();
       this.scope = new TransparentPointerScope();
       this.publishers = new ConcurrentHashMap<>();
-      this.kairos = scope.attachTransparent(Kairos.kairos_new());
-      if (this.kairos == null || this.kairos.isNull()) {
-        throw new IllegalStateException("Failed to initialise Kairos instance");
-      }
       registerBrokers();
       initScheduler(schedulerLibName);
     }
 
     private void registerBrokers() {
-      final FFIKairosDylib brokerDylib = this.scope.attachTransparent(new FFIKairosDylib());
-      brokerDylib.lib_type(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
-      final BytePointer libName = this.scope.attachTransparent(new BytePointer(DATA_BROKER_NAME));
-      brokerDylib.name(libName);
-      brokerDylib.name_len(libName.getStringBytes().length);
+      final DylibSpecifier brokerDylib = this.scope.attachTransparent(new DylibSpecifier());
+      brokerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
+      brokerDylib.name(SliceUtils.fromString(DATA_BROKER_NAME, this.scope));
       final DataBrokerBootstrapFn bootstrapFn = this.scope.attachTransparent(new DataBrokerBootstrapFn() {
         @Override
         public OptionalGenericError call(final DataBrokerPlugin plugin) {
@@ -409,7 +415,7 @@ public class ExecutorService {
         }
       });
       final Kairos.FFIKairosResult result = Kairos.kairos_register_data_broker_dylib(
-        this.kairos,
+        ExecutorService.KAIROS,
         brokerDylib,
         Kairos.new_dummy_logger_drain(),
         bootstrapFn
@@ -420,15 +426,14 @@ public class ExecutorService {
     }
 
     private void initScheduler(final String schedulerLibName) {
-      final FFIKairosDylib schedulerDylib = this.scope.attachTransparent(new FFIKairosDylib());
-      schedulerDylib.lib_type(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
-      final BytePointer libName = this.scope.attachTransparent(new BytePointer(schedulerLibName));
-      schedulerDylib.name(libName);
-      schedulerDylib.name_len(libName.getStringBytes().length);
-      final Kairos.FFIKairosResult result = Kairos.kairos_run_with_scheduler_dylib(
-        this.kairos,
+      final DylibSpecifier schedulerDylib = this.scope.attachTransparent(new DylibSpecifier());
+      schedulerDylib.instanceName(SliceUtils.fromString(this.config.getName(), this.scope));
+      schedulerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
+      schedulerDylib.name(SliceUtils.fromString(schedulerLibName, this.scope));
+      final Kairos.FFIKairosResult result = Kairos.kairos_run_scheduler_dylib(
+        ExecutorService.KAIROS,
         schedulerDylib,
-        null,
+        null, // TODO: Implement this
         Kairos.new_dummy_logger_drain()
       ).intern();
       if (result != Kairos.FFIKairosResult.KAIROS_SUCCESS) {
@@ -444,7 +449,9 @@ public class ExecutorService {
         }
       };
       final Kairos.FFIKairosResult result = Kairos.kairos_submit(
-        this.kairos, TaskUtils.create(
+        ExecutorService.KAIROS,
+        SliceUtils.fromString(this.config.getName(), this.scope),
+        TaskUtils.create(
           0,
           null,
           task,
