@@ -31,6 +31,9 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import com.engineersbox.kairos.CMap;
+import com.engineersbox.kairos.CMapBox;
+import com.engineersbox.kairos.CMapContainer;
 import com.engineersbox.kairos.DataBrokerBootstrapFn;
 import com.engineersbox.kairos.DataBrokerPlugin;
 import com.engineersbox.kairos.DataPublisherBox;
@@ -53,13 +56,14 @@ import com.engineersbox.kairos.scope.TransparentPointerScope;
 import com.engineersbox.kairos.utils.OptionalUtils;
 import com.engineersbox.kairos.utils.SliceUtils;
 import com.engineersbox.kairos.utils.TaskUtils;
-import com.engineersbox.kairos.workers.FixedSizeThreadPoolWorkerGroup;
 import org.apache.hadoop.hbase.monitoring.ThreadMonitoring;
 import org.apache.hadoop.hbase.util.Threads;
+import org.apache.hbase.thirdparty.com.google.common.collect.ImmutableMap;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.bytedeco.javacpp.BytePointer;
+import org.bytedeco.javacpp.LongPointer;
 import org.bytedeco.javacpp.Pointer;
-import org.bytedeco.javacpp.PointerScope;
+import org.bytedeco.javacpp.PointerPointer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -96,8 +100,8 @@ public class ExecutorService {
       @Override
       public void run() {
         try {
-          final Kairos.FFIKairosResult result = Kairos.kairos_free(KAIROS).intern();
-          if (result != Kairos.FFIKairosResult.KAIROS_SUCCESS) {
+          final Kairos.KairosResult result = Kairos.kairos_free(KAIROS).intern();
+          if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
             throw new IllegalStateException("Failed to destroy Kairos: " + result);
           }
         } finally {
@@ -290,11 +294,38 @@ public class ExecutorService {
     }
   }
 
+  static class DataBrokerProperties extends CMap implements IntoBox<CMapBox> {
+
+    private final Map<String, Pointer> properties;
+
+    public DataBrokerProperties(final TransparentPointerScope scope, final long queueSize) {
+      this.properties = ImmutableMap.<String, Pointer>builder()
+        .put("queue_size", scope.attachTransparent(new LongPointer(queueSize)))
+        .build();
+    }
+
+    @Override
+    public int get(final CMapContainer cont, final SliceU8 key, final PointerPointer okOut) {
+      final Pointer ptr = this.properties.get(SliceUtils.intoString(key));
+      if (ptr == null) {
+        return Kairos.MapResult.MAP_RESULT_NOT_FOUND.value;
+      }
+      okOut.put(ptr);
+      return Kairos.MapResult.MAP_RESULT_FOUND.value;
+    }
+
+    @Override
+    public Kairos.MapResult set(final CMapContainer cont, final SliceU8 key, final Pointer value) {
+      this.properties.put(SliceUtils.intoString(key), value);
+      return Kairos.MapResult.MAP_RESULT_FOUND;
+    }
+  }
+
   /**
    * Executor instance.
    */
   static class Executor {
-    public static final String DATA_BROKER_NAME = "<TODO>";
+    public static final String DATA_BROKER_NAME = "example_broker";
     // the thread pool executor that services the requests
     final TrackingThreadPoolExecutor threadPoolExecutor;
     // work queue to use - unbounded queue
@@ -339,8 +370,8 @@ public class ExecutorService {
             topic,
             publisher
           );
-          if (result == Kairos.GenericError.Failed.value) {
-            return OptionalUtils.some(Kairos.GenericError.Failed, scope);
+          if (result == Kairos.GenericError.GENERIC_ERROR_FAILED.value) {
+            return OptionalUtils.some(Kairos.GenericError.GENERIC_ERROR_FAILED, scope);
           }
           publishers.put(
             DATA_BROKER_NAME,
@@ -349,13 +380,14 @@ public class ExecutorService {
           return OptionalUtils.none(scope);
         }
       });
-      final Kairos.FFIKairosResult result = Kairos.kairos_register_data_broker_dylib(
+      final Kairos.KairosResult result = Kairos.kairos_register_data_broker_dylib(
         ExecutorService.KAIROS,
         brokerDylib,
+        scope.attachTransparent(new DataBrokerProperties(scope, 10).intoBox()),
         Kairos.new_dummy_logger_drain(),
         bootstrapFn
       ).intern();
-      if (result != Kairos.FFIKairosResult.KAIROS_SUCCESS) {
+      if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
         throw new IllegalStateException("Failed to register data broker: " + result.name());
       }
     }
@@ -365,7 +397,7 @@ public class ExecutorService {
       schedulerDylib.instanceName(SliceUtils.fromString(name, this.scope));
       schedulerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
       schedulerDylib.name(SliceUtils.fromString(schedulerLibName, this.scope));
-      final Kairos.FFIKairosResult result = Kairos.kairos_run_scheduler_dylib(
+      final Kairos.KairosResult result = Kairos.kairos_run_scheduler_dylib(
         ExecutorService.KAIROS,
         schedulerDylib,
         scope.attachTransparent(new TrackingThreadPoolProvider(
@@ -377,7 +409,7 @@ public class ExecutorService {
           scope
         ).intoBox())
       ).intern();
-      if (result != Kairos.FFIKairosResult.KAIROS_SUCCESS) {
+      if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
         throw new IllegalStateException("Failed to run scheduler: " + result.name());
       }
     }
@@ -394,7 +426,7 @@ public class ExecutorService {
           event.run();
         }
       });
-      final Kairos.FFIKairosResult result = Kairos.kairos_submit(
+      final Kairos.KairosResult result = Kairos.kairos_submit(
         ExecutorService.KAIROS,
         SliceUtils.fromString(name, this.scope),
         TaskUtils.create(
@@ -404,7 +436,7 @@ public class ExecutorService {
           this.scope
         )
       ).intern();
-      if (result != Kairos.FFIKairosResult.KAIROS_SUCCESS) {
+      if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
         throw new IllegalStateException("Failed to submit task: " + result.name());
       }
     }
@@ -513,7 +545,7 @@ public class ExecutorService {
         }
       });
       group.saturateBox(workerGroupBox);
-      return Kairos.GenericError.Success.value;
+      return Kairos.GenericError.GENERIC_ERROR_SUCCESS.value;
     }
   }
 
