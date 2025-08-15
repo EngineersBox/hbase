@@ -305,19 +305,29 @@ public class ExecutorService {
     }
 
     @Override
-    public int get(final CMapContainer cont, final SliceU8 key, final PointerPointer okOut) {
+    public Kairos.MapGetResult getValue(final CMapContainer cont, final SliceU8 key, final PointerPointer okOut) {
       final Pointer ptr = this.properties.get(SliceUtils.intoString(key));
       if (ptr == null) {
-        return Kairos.MapResult.MAP_RESULT_NOT_FOUND.value;
+        return Kairos.MapGetResult.MAP_GET_RESULT_NOT_FOUND;
       }
       okOut.put(ptr);
-      return Kairos.MapResult.MAP_RESULT_FOUND.value;
+      return Kairos.MapGetResult.MAP_GET_RESULT_FOUND;
     }
 
     @Override
-    public Kairos.MapResult set(final CMapContainer cont, final SliceU8 key, final Pointer value) {
+    public Kairos.MapPutResult putValue(final CMapContainer cont, final SliceU8 key, final Pointer value, final PointerPointer existingValue) {
       this.properties.put(SliceUtils.intoString(key), value);
-      return Kairos.MapResult.MAP_RESULT_FOUND;
+      return Kairos.MapPutResult.MAP_PUT_RESULT_SUCCESS;
+    }
+
+    @Override
+    public Kairos.MapRemoveResult removeValue(CMapContainer cont, SliceU8 key,
+      final PointerPointer existingValue) {
+      final Pointer value = this.properties.remove(SliceUtils.intoString(key));
+      if (value != null) {
+        existingValue.put(value);
+      }
+      return Kairos.MapRemoveResult.MAP_REMOVE_RESULT_SUCCESS;
     }
   }
 
@@ -532,7 +542,7 @@ public class ExecutorService {
     }
 
     @Override
-    public int provide(final WorkerGroupProviderContainer workerGroupProviderContainer,
+    public Kairos.GenericError provide(final WorkerGroupProviderContainer workerGroupProviderContainer,
       final long id,
       final WorkerGroupBox workerGroupBox) {
       final WorkerGroup group = scope.attachTransparent(new WorkerGroup() {
@@ -545,7 +555,7 @@ public class ExecutorService {
         }
       });
       group.saturateBox(workerGroupBox);
-      return Kairos.GenericError.GENERIC_ERROR_SUCCESS.value;
+      return Kairos.GenericError.GENERIC_ERROR_SUCCESS;
     }
   }
 
