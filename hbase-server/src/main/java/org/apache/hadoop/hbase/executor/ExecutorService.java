@@ -50,6 +50,7 @@ import com.engineersbox.kairos.WorkerGroupContainer;
 import com.engineersbox.kairos.WorkerGroupProvider;
 import com.engineersbox.kairos.WorkerGroupProviderBox;
 import com.engineersbox.kairos.WorkerGroupProviderContainer;
+import com.engineersbox.kairos.broker.HashCMap;
 import com.engineersbox.kairos.conversion.IntoBox;
 import com.engineersbox.kairos.logging.SLF4JLoggerDrain;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
@@ -294,41 +295,19 @@ public class ExecutorService {
     }
   }
 
-  static class DataBrokerProperties extends CMap implements IntoBox<CMapBox> {
+  static class DataBrokerProperties extends HashCMap {
 
-    private final Map<String, Pointer> properties;
+    private final TransparentPointerScope scope;
 
-    public DataBrokerProperties(final TransparentPointerScope scope, final long queueSize) {
-      this.properties = ImmutableMap.<String, Pointer>builder()
-        .put("queue_size", scope.attachTransparent(new LongPointer(queueSize)))
-        .build();
+    public DataBrokerProperties(final TransparentPointerScope scope) {
+      this.scope = scope;
     }
 
-    @Override
-    public Kairos.MapGetResult getValue(final CMapContainer cont, final SliceU8 key, final PointerPointer okOut) {
-      final Pointer ptr = this.properties.get(SliceUtils.intoString(key));
-      if (ptr == null) {
-        return Kairos.MapGetResult.MAP_GET_RESULT_NOT_FOUND;
-      }
-      okOut.put(ptr);
-      return Kairos.MapGetResult.MAP_GET_RESULT_FOUND;
+    public DataBrokerProperties queueSize(final long queueSize) {
+      super.put("queue_size", this.scope.attachTransparent(new LongPointer(new long[]{queueSize})));
+      return this;
     }
 
-    @Override
-    public Kairos.MapPutResult putValue(final CMapContainer cont, final SliceU8 key, final Pointer value, final PointerPointer existingValue) {
-      this.properties.put(SliceUtils.intoString(key), value);
-      return Kairos.MapPutResult.MAP_PUT_RESULT_SUCCESS;
-    }
-
-    @Override
-    public Kairos.MapRemoveResult removeValue(CMapContainer cont, SliceU8 key,
-      final PointerPointer existingValue) {
-      final Pointer value = this.properties.remove(SliceUtils.intoString(key));
-      if (value != null) {
-        existingValue.put(value);
-      }
-      return Kairos.MapRemoveResult.MAP_REMOVE_RESULT_SUCCESS;
-    }
   }
 
   /**
@@ -390,10 +369,12 @@ public class ExecutorService {
           return OptionalUtils.none(scope);
         }
       });
+      final DataBrokerProperties properties = scope.attachTransparent(new DataBrokerProperties(scope))
+        .queueSize(10);
       final Kairos.KairosResult result = Kairos.kairos_register_data_broker_dylib(
         ExecutorService.KAIROS,
         brokerDylib,
-        scope.attachTransparent(new DataBrokerProperties(scope, 10).intoBox()),
+        scope.attachTransparent(properties.intoBox()),
         Kairos.new_dummy_logger_drain(),
         bootstrapFn
       ).intern();
