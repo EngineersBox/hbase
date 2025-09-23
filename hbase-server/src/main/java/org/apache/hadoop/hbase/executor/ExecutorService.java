@@ -31,9 +31,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import com.engineersbox.kairos.CMap;
-import com.engineersbox.kairos.CMapBox;
-import com.engineersbox.kairos.CMapContainer;
 import com.engineersbox.kairos.DataBrokerBootstrapFn;
 import com.engineersbox.kairos.DataBrokerPlugin;
 import com.engineersbox.kairos.DataPublisherBox;
@@ -50,7 +47,7 @@ import com.engineersbox.kairos.WorkerGroupContainer;
 import com.engineersbox.kairos.WorkerGroupProvider;
 import com.engineersbox.kairos.WorkerGroupProviderBox;
 import com.engineersbox.kairos.WorkerGroupProviderContainer;
-import com.engineersbox.kairos.broker.HashCMap;
+import com.engineersbox.kairos.collection.HashCMap;
 import com.engineersbox.kairos.conversion.IntoBox;
 import com.engineersbox.kairos.logging.SLF4JLoggerDrain;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
@@ -59,12 +56,10 @@ import com.engineersbox.kairos.utils.SliceUtils;
 import com.engineersbox.kairos.utils.TaskUtils;
 import org.apache.hadoop.hbase.monitoring.ThreadMonitoring;
 import org.apache.hadoop.hbase.util.Threads;
-import org.apache.hbase.thirdparty.com.google.common.collect.ImmutableMap;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.bytedeco.javacpp.BytePointer;
 import org.bytedeco.javacpp.LongPointer;
 import org.bytedeco.javacpp.Pointer;
-import org.bytedeco.javacpp.PointerPointer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -409,11 +404,11 @@ public class ExecutorService {
      * Submit the event to the queue for handling.
      */
     void submit(final EventHandler event) {
-      // If there is a listener for this type, make sure we call the before
-      // and after process methods.
       final TaskRunnable task = scope.attachTransparent(new TaskRunnable() {
         @Override
         public void run(final TaskRunnableContainer cont, final Pointer context) {
+          // If there is a listener for this type, make sure we call the before
+          // and after process methods.
           event.run();
         }
       });
