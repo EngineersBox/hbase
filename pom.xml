@@ -793,9 +793,24 @@
     <apacheds.version>2.0.0.AM26</apacheds.version>
     <ldap-api.version>2.0.0</ldap-api.version>
   </properties>
+  <repositories>
+    <repository>
+        <id>central</id>
+        <url>https://repo.maven.apache.org/maven2</url>
+    </repository>
+    <repository>
+        <id>gh-kairos</id>
+        <url>https://maven.pkg.github.com/engineersbox/kairos</url>
+    </repository>
+  </repositories>
   <!-- Sorted by groups of dependencies then groupId and artifactId -->
   <dependencyManagement>
     <dependencies>
+      <dependency>
+        <groupId>com.engineersbox</groupId>
+        <artifactId>kairos-platform</artifactId>
+        <version>0.1.0</version>
+      </dependency>
       <!--
       Note: There are a few exclusions to prevent duplicate code in different jars to be included:
           org.mortbay.jetty:servlet-api, javax.servlet:servlet-api: These are excluded because they are
