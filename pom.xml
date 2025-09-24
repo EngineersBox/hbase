@@ -522,16 +522,6 @@
       <url>file:///tmp</url>
     </site>
   </distributionManagement>
-  <repositoryManagement>
-    <repository>
-        <id>central</id>
-        <url>https://repo.maven.apache.org/maven2</url>
-    </repository>
-    <repository>
-        <id>gh-kairos</id>
-        <url>https://maven.pkg.github.com/engineersbox/kairos</url>
-    </repository>
-  </repositoryManagement>
   <properties>
     <revision>2.6.3</revision>
     <!-- override on command line to have generated LICENSE files include
