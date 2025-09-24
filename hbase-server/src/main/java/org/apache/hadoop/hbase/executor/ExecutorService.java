@@ -31,9 +31,35 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import com.engineersbox.kairos.DataBrokerBootstrapFn;
+import com.engineersbox.kairos.DataBrokerPlugin;
+import com.engineersbox.kairos.DataPublisherBox;
+import com.engineersbox.kairos.DylibSpecifier;
+import com.engineersbox.kairos.Kairos;
+import com.engineersbox.kairos.OptionalGenericError;
+import com.engineersbox.kairos.SliceU8;
+import com.engineersbox.kairos.TaskRunnable;
+import com.engineersbox.kairos.TaskRunnableBox;
+import com.engineersbox.kairos.TaskRunnableContainer;
+import com.engineersbox.kairos.WorkerGroup;
+import com.engineersbox.kairos.WorkerGroupBox;
+import com.engineersbox.kairos.WorkerGroupContainer;
+import com.engineersbox.kairos.WorkerGroupProvider;
+import com.engineersbox.kairos.WorkerGroupProviderBox;
+import com.engineersbox.kairos.WorkerGroupProviderContainer;
+import com.engineersbox.kairos.collection.HashCMap;
+import com.engineersbox.kairos.conversion.IntoBox;
+import com.engineersbox.kairos.logging.SLF4JLoggerDrain;
+import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.OptionalUtils;
+import com.engineersbox.kairos.utils.SliceUtils;
+import com.engineersbox.kairos.utils.TaskUtils;
 import org.apache.hadoop.hbase.monitoring.ThreadMonitoring;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.yetus.audience.InterfaceAudience;
+import org.bytedeco.javacpp.BytePointer;
+import org.bytedeco.javacpp.LongPointer;
+import org.bytedeco.javacpp.Pointer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -59,6 +85,27 @@ import org.apache.hbase.thirdparty.com.google.common.util.concurrent.ThreadFacto
 @InterfaceAudience.Private
 public class ExecutorService {
   private static final Logger LOG = LoggerFactory.getLogger(ExecutorService.class);
+  private static final BytePointer KAIROS;
+
+  static {
+    KAIROS = Kairos.kairos_new();
+    if (KAIROS == null || KAIROS.isNull()) {
+      throw new IllegalStateException("Failed to initialise Kairos");
+    }
+    Runtime.getRuntime().addShutdownHook(new Thread() {
+      @Override
+      public void run() {
+        try {
+          final Kairos.KairosResult result = Kairos.kairos_free(KAIROS).intern();
+          if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
+            throw new IllegalStateException("Failed to destroy Kairos: " + result);
+          }
+        } finally {
+          KAIROS.deallocate();
+        }
+      }
+    });
+  }
 
   // hold the all the executors created in a map addressable by their names
   private final ConcurrentMap<String, Executor> executorMap = new ConcurrentHashMap<>();
@@ -104,9 +151,13 @@ public class ExecutorService {
   public void shutdown() {
     this.delayedSubmitTimer.shutdownNow();
     for (Entry<String, Executor> entry : this.executorMap.entrySet()) {
-      List<Runnable> wasRunning = entry.getValue().threadPoolExecutor.shutdownNow();
-      if (!wasRunning.isEmpty()) {
-        LOG.info(entry.getValue() + " had " + wasRunning + " on shutdown");
+      try {
+        List<Runnable> wasRunning = entry.getValue().shutdownNow();
+        if (!wasRunning.isEmpty()) {
+          LOG.info(entry.getValue() + " had " + wasRunning + " on shutdown");
+        }
+      } catch (final Exception e) {
+        LOG.error("Failed to shutdown executor service " + entry.getKey(), e);
       }
     }
     this.executorMap.clear();
@@ -179,6 +230,7 @@ public class ExecutorService {
     private boolean allowCoreThreadTimeout = false;
     private long keepAliveTimeMillis = KEEP_ALIVE_TIME_MILLIS_DEFAULT;
     private ExecutorType executorType;
+    private String schedulerLibName = "example_scheduler";
 
     public ExecutorConfig setExecutorType(ExecutorType type) {
       this.executorType = type;
@@ -187,6 +239,15 @@ public class ExecutorService {
 
     private ExecutorType getExecutorType() {
       return Preconditions.checkNotNull(executorType, "ExecutorType not set.");
+    }
+
+    public ExecutorConfig setSchedulerLibName(final String schedulerLibName) {
+      this.schedulerLibName = schedulerLibName;
+      return this;
+    }
+
+    public String getSchedulerLibName() {
+      return this.schedulerLibName;
     }
 
     public int getCorePoolSize() {
@@ -229,21 +290,41 @@ public class ExecutorService {
     }
   }
 
+  static class DataBrokerProperties extends HashCMap {
+
+    private final TransparentPointerScope scope;
+
+    public DataBrokerProperties(final TransparentPointerScope scope) {
+      this.scope = scope;
+    }
+
+    public DataBrokerProperties queueSize(final long queueSize) {
+      super.put("queue_size", this.scope.attachTransparent(new LongPointer(new long[]{queueSize})));
+      return this;
+    }
+
+  }
+
   /**
    * Executor instance.
    */
   static class Executor {
+    public static final String DATA_BROKER_NAME = "example_broker";
     // the thread pool executor that services the requests
     final TrackingThreadPoolExecutor threadPoolExecutor;
     // work queue to use - unbounded queue
     final BlockingQueue<Runnable> q = new LinkedBlockingQueue<>();
+    private final ConcurrentMap<String, DataPublisherBox> publishers;
     private final String name;
     private static final AtomicLong seqids = new AtomicLong(0);
     private final long id;
+    private final TransparentPointerScope scope;
 
-    protected Executor(ExecutorConfig config) {
+    protected Executor(final ExecutorConfig config) {
       this.id = seqids.incrementAndGet();
       this.name = config.getName();
+      this.scope = new TransparentPointerScope();
+      this.publishers = new ConcurrentHashMap<>();
       // create the thread pool executor
       this.threadPoolExecutor = new TrackingThreadPoolExecutor(
         // setting maxPoolSize > corePoolSize has no effect since we use an unbounded task queue.
@@ -256,19 +337,102 @@ public class ExecutorService {
       tfb.setDaemon(true);
       tfb.setUncaughtExceptionHandler(Threads.LOGGING_EXCEPTION_HANDLER);
       this.threadPoolExecutor.setThreadFactory(tfb.build());
+      registerBrokers();
+      initScheduler(config.getSchedulerLibName());
+    }
+    private void registerBrokers() {
+      final DylibSpecifier brokerDylib = this.scope.attachTransparent(new DylibSpecifier());
+      brokerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
+      brokerDylib.name(SliceUtils.fromString(DATA_BROKER_NAME, this.scope));
+      final DataBrokerBootstrapFn bootstrapFn = this.scope.attachTransparent(new DataBrokerBootstrapFn() {
+        @Override
+        public OptionalGenericError call(final DataBrokerPlugin plugin) {
+          final DataPublisherBox publisher = scope.attachTransparent(new DataPublisherBox());
+          final SliceU8 topic = SliceUtils.fromString(name, scope);
+          final int result = plugin.vtbl_databroker().publish().call(
+            plugin.container(),
+            topic,
+            publisher
+          );
+          if (result == Kairos.GenericError.GENERIC_ERROR_FAILED.value) {
+            return OptionalUtils.some(Kairos.GenericError.GENERIC_ERROR_FAILED, scope);
+          }
+          publishers.put(
+            DATA_BROKER_NAME,
+            publisher
+          );
+          return OptionalUtils.none(scope);
+        }
+      });
+      final DataBrokerProperties properties = scope.attachTransparent(new DataBrokerProperties(scope))
+        .queueSize(10);
+      final Kairos.KairosResult result = Kairos.kairos_register_data_broker_dylib(
+        ExecutorService.KAIROS,
+        brokerDylib,
+        scope.attachTransparent(properties.intoBox()),
+        Kairos.new_dummy_logger_drain(),
+        bootstrapFn
+      ).intern();
+      if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
+        throw new IllegalStateException("Failed to register data broker: " + result.name());
+      }
+    }
+
+    private void initScheduler(final String schedulerLibName) {
+      final DylibSpecifier schedulerDylib = this.scope.attachTransparent(new DylibSpecifier());
+      schedulerDylib.instanceName(SliceUtils.fromString(name, this.scope));
+      schedulerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
+      schedulerDylib.name(SliceUtils.fromString(schedulerLibName, this.scope));
+      final Kairos.KairosResult result = Kairos.kairos_run_scheduler_dylib(
+        ExecutorService.KAIROS,
+        schedulerDylib,
+        scope.attachTransparent(new TrackingThreadPoolProvider(
+          scope,
+          threadPoolExecutor
+        ).intoBox()),
+        scope.attachTransparent(new SLF4JLoggerDrain(
+          this.toString(),
+          scope
+        ).intoBox())
+      ).intern();
+      if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
+        throw new IllegalStateException("Failed to run scheduler: " + result.name());
+      }
     }
 
     /**
      * Submit the event to the queue for handling.
      */
     void submit(final EventHandler event) {
-      // If there is a listener for this type, make sure we call the before
-      // and after process methods.
-      this.threadPoolExecutor.execute(event);
+      final TaskRunnable task = scope.attachTransparent(new TaskRunnable() {
+        @Override
+        public void run(final TaskRunnableContainer cont, final Pointer context) {
+          // If there is a listener for this type, make sure we call the before
+          // and after process methods.
+          event.run();
+        }
+      });
+      final Kairos.KairosResult result = Kairos.kairos_submit(
+        ExecutorService.KAIROS,
+        SliceUtils.fromString(name, this.scope),
+        TaskUtils.create(
+          0,
+          null,
+          task,
+          this.scope
+        )
+      ).intern();
+      if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
+        throw new IllegalStateException("Failed to submit task: " + result.name());
+      }
     }
 
     TrackingThreadPoolExecutor getThreadPoolExecutor() {
       return threadPoolExecutor;
+    }
+
+    DataPublisherBox getDataPublisher(final String name) {
+      return this.publishers.get(name);
     }
 
     @Override
@@ -297,6 +461,12 @@ public class ExecutorService {
       }
 
       return new ExecutorStatus(this, queuedEvents, running);
+    }
+
+    public List<Runnable> shutdownNow() throws Exception {
+      final List<Runnable> tasks = this.threadPoolExecutor.shutdownNow();
+      this.scope.close();
+      return tasks;
     }
   }
 
@@ -335,6 +505,36 @@ public class ExecutorService {
     }
   }
 
+  private static final class TrackingThreadPoolProvider extends WorkerGroupProvider implements
+    IntoBox<WorkerGroupProviderBox> {
+
+    private final TransparentPointerScope scope;
+    private final TrackingThreadPoolExecutor executor;
+
+    public TrackingThreadPoolProvider(final TransparentPointerScope scope, final TrackingThreadPoolExecutor executor) {
+      this.scope = scope;
+      this.scope.attach(this);
+      this.executor = executor;
+    }
+
+    @Override
+    public Kairos.GenericError provide(final WorkerGroupProviderContainer workerGroupProviderContainer,
+      final long id,
+      final WorkerGroupBox workerGroupBox) {
+      final WorkerGroup group = scope.attachTransparent(new WorkerGroup() {
+        @Override
+        public OptionalGenericError assignWorker(final WorkerGroupContainer workerGroupContainer,
+          final TaskRunnableBox taskRunnableBox,
+          final Pointer pointer) {
+          executor.submit(TaskUtils.intoRunnable(taskRunnableBox, pointer));
+          return OptionalUtils.none(scope);
+        }
+      });
+      group.saturateBox(workerGroupBox);
+      return Kairos.GenericError.GENERIC_ERROR_SUCCESS;
+    }
+  }
+
   /**
    * A snapshot of the status of a particular executor. This includes the contents of the executor's
    * pending queue, as well as the threads and events currently being processed. This is a
@@ -350,6 +550,14 @@ public class ExecutorService {
       this.executor = executor;
       this.queuedEvents = queuedEvents;
       this.running = running;
+    }
+
+    public List<EventHandler> getQueuedEvents() {
+      return queuedEvents;
+    }
+
+    public List<RunningEventStatus> getRunning() {
+      return running;
     }
 
     /**
