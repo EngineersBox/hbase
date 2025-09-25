@@ -796,14 +796,12 @@
   <repositories>
     <repository>
         <id>gh-kairos</id>
-        <url>https://maven.pkg.github.com/engineersbox/kairos</url>
+        <url>https://maven.pkg.github.com/EngineersBox/Kairos</url>
         <releases>
           <enabled>true</enabled>
-	        <updatePolicy>daily</updatePolicy>
 	      </releases>
 		    <snapshots>
 	        <enabled>true</enabled>
-	        <updatePolicy>always</updatePolicy>
 	      </snapshots>
     </repository>
   </repositories>
