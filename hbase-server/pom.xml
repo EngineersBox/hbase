@@ -40,7 +40,7 @@
   <repositories>
     <repository>
         <id>gh-kairos</id>
-        <url>https://maven.pkg.github.com/EngineersBox/Kairos</url>
+        <url>https://maven.pkg.github.com/engineersbox/kairos</url>
         <releases>
           <enabled>true</enabled>
 	      </releases>
