@@ -37,6 +37,18 @@
     <license.bundles.vega>true</license.bundles.vega>
     <hbase.webapps.dir>hbase-webapps</hbase.webapps.dir>
   </properties>
+  <repositories>
+    <repository>
+        <id>gh-kairos</id>
+        <url>https://maven.pkg.github.com/EngineersBox/Kairos</url>
+        <releases>
+          <enabled>true</enabled>
+	      </releases>
+		    <snapshots>
+	        <enabled>true</enabled>
+	      </snapshots>
+    </repository>
+  </repositories>
   <dependencies>
     <dependency>
       <groupId>com.engineersbox</groupId>
