@@ -286,7 +286,6 @@ public class RegionScannerImpl implements RegionScanner, Shipper, RpcCallback {
       moreValues = nextInternal(tmpList, scannerContext);
       outResults.addAll(tmpList);
     }
-
     region.addReadRequestsCount(1);
     if (region.getMetrics() != null) {
       region.getMetrics().updateReadRequestCount();

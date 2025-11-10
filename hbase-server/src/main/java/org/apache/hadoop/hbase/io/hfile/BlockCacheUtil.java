@@ -285,9 +285,10 @@ public class BlockCacheUtil {
       .withOnDiskSizeWithoutHeader(block.getOnDiskSizeWithoutHeader())
       .withUncompressedSizeWithoutHeader(block.getUncompressedSizeWithoutHeader())
       .withPrevBlockOffset(block.getPrevBlockOffset()).withByteBuff(buff)
-      .withFillHeader(FILL_HEADER).withOffset(block.getOffset()).withNextBlockOnDiskSize(-1)
+      .withFillHeader(FILL_HEADER).withOffset(block.getOffset())
       .withOnDiskDataSizeWithHeader(block.getOnDiskDataSizeWithHeader() + numBytes)
       .withHFileContext(cloneContext(block.getHFileContext()))
+      .withNextBlockOnDiskSize(block.getNextBlockOnDiskSize())
       .withByteBuffAllocator(cacheConf.getByteBuffAllocator()).withShared(!buff.hasArray()).build();
   }
 

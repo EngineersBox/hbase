@@ -523,7 +523,7 @@
     </site>
   </distributionManagement>
   <properties>
-    <revision>2.6.3</revision>
+    <revision>2.6.5-SNAPSHOT</revision>
     <!-- override on command line to have generated LICENSE files include
          diagnostic info for verifying notice requirements -->
     <license.debug.print.included>false</license.debug.print.included>
@@ -548,7 +548,7 @@
     <java.min.version>${compileSource}</java.min.version>
     <!-- Dependencies -->
     <hadoop-two.version>2.10.2</hadoop-two.version>
-    <hadoop-three.version>3.4.1</hadoop-three.version>
+    <hadoop-three.version>3.4.2</hadoop-three.version>
     <!-- These must be defined here for downstream build tools that don't look at profiles.
          They ought to match the values found in our default hadoop profile, which is
          currently "hadoop-2.0". See HBASE-15925 for more info. -->
@@ -566,7 +566,7 @@
       in the dependencyManagement section as it could still lead to different versions of netty
       modules and cause trouble if we only rely on transitive dependencies.
     -->
-    <netty4.version>4.1.121.Final</netty4.version>
+    <netty4.version>4.1.123.Final</netty4.version>
     <!-- end HBASE-15925 default hadoop compatibility values -->
     <audience-annotations.version>0.13.0</audience-annotations.version>
     <!--
@@ -578,7 +578,7 @@
     <caffeine.version>2.8.1</caffeine.version>
     <commons-codec.version>1.15</commons-codec.version>
     <commons-io.version>2.18.0</commons-io.version>
-    <commons-lang3.version>3.17.0</commons-lang3.version>
+    <commons-lang3.version>3.18.0</commons-lang3.version>
     <commons-math.version>3.6.1</commons-math.version>
     <commons-cli.version>1.5.0</commons-cli.version>
     <disruptor.version>3.4.4</disruptor.version>
@@ -589,14 +589,15 @@
       Note that the version of jackson-[annotations,core,databind] must be kept in sync with the
       version of jackson-jaxrs-json-provider shipped in hbase-thirdparty.
     -->
-    <jackson.version>2.19.0</jackson.version>
-    <jackson.databind.version>2.19.0</jackson.databind.version>
+    <jackson.version>2.19.2</jackson.version>
+    <jackson.databind.version>2.19.2</jackson.databind.version>
     <jaxb-api.version>2.3.1</jaxb-api.version>
     <servlet.api.version>3.1.0</servlet.api.version>
     <wx.rs.api.version>2.1.1</wx.rs.api.version>
-    <tomcat.jasper.version>9.0.104</tomcat.jasper.version>
+    <tomcat.jasper.version>9.0.110</tomcat.jasper.version>
     <jruby.version>9.3.15.0</jruby.version>
-    <junit.version>4.13.2</junit.version>
+    <junit.jupiter.version>5.13.4</junit.jupiter.version>
+    <junit.vintage.version>5.13.4</junit.vintage.version>
     <hamcrest.version>1.3</hamcrest.version>
     <opentelemetry.version>1.49.0</opentelemetry.version>
     <opentelemetry-semconv.version>1.29.0-alpha</opentelemetry-semconv.version>
@@ -612,7 +613,7 @@
       Version of protobuf that hbase uses internally (we shade our pb) Must match what is out
       in hbase-thirdparty include.
     -->
-    <internal.protobuf.version>4.30.2</internal.protobuf.version>
+    <internal.protobuf.version>4.31.1</internal.protobuf.version>
     <protobuf.plugin.version>0.6.1</protobuf.plugin.version>
     <thrift.path>thrift</thrift.path>
     <thrift.version>0.14.1</thrift.version>
@@ -626,7 +627,7 @@
     <joni.version>2.2.1</joni.version>
     <jcodings.version>1.0.58</jcodings.version>
     <spy.version>2.12.3</spy.version>
-    <bouncycastle.version>1.78</bouncycastle.version>
+    <bouncycastle.version>1.81</bouncycastle.version>
     <skyscreamer.version>1.5.1</skyscreamer.version>
     <kerby.version>1.0.1</kerby.version>
     <commons-crypto.version>1.1.0</commons-crypto.version>
@@ -654,11 +655,11 @@
     <maven.warbucks.version>1.1.0</maven.warbucks.version>
     <maven.project.info.report.version>3.1.2</maven.project.info.report.version>
     <maven-owasp-plugin.version>12.1.0</maven-owasp-plugin.version>
-    <os.maven.version>1.5.0.Final</os.maven.version>
+    <os.maven.version>1.7.1</os.maven.version>
     <findbugs-annotations.version>1.3.9-1</findbugs-annotations.version>
     <spotbugs.version>4.7.3</spotbugs.version>
     <spotbugs.maven.version>4.7.2.1</spotbugs.maven.version>
-    <surefire.version>3.1.0</surefire.version>
+    <surefire.version>3.5.3</surefire.version>
     <wagon.ssh.version>2.12</wagon.ssh.version>
     <xml.maven.version>1.0.1</xml.maven.version>
     <spotless.version>2.44.4</spotless.version>
@@ -675,7 +676,7 @@
         databind] must be kept in sync with the version of jackson-jaxrs-json-provider shipped in
         hbase-thirdparty.
     -->
-    <hbase-thirdparty.version>4.1.11</hbase-thirdparty.version>
+    <hbase-thirdparty.version>4.1.12</hbase-thirdparty.version>
     <!-- Coverage properties -->
     <jacoco.version>0.8.8</jacoco.version>
     <jacocoArgLine/>
@@ -693,7 +694,6 @@
     <zookeeper.test.jar>hbase-zookeeper-${project.version}-tests.jar</zookeeper.test.jar>
     <asyncfs.test.jar>hbase-asyncfs-${project.version}-tests.jar</asyncfs.test.jar>
     <shell-executable>bash</shell-executable>
-    <surefire.provider>surefire-junit47</surefire.provider>
     <!-- default: run small & medium, medium with 2 threads -->
     <surefire.skipFirstPart>false</surefire.skipFirstPart>
     <surefire.skipSecondPart>false</surefire.skipSecondPart>
@@ -765,6 +765,15 @@
       --add-opens java.base/sun.security.x509=ALL-UNNAMED
       --add-opens java.base/sun.security.util=ALL-UNNAMED
       --add-opens java.base/java.net=ALL-UNNAMED</hbase-surefire.jdk17.flags>
+    <!--
+      Java 18+ disables the Security Manager by default. Hadoop 3.4.2 and earlier doesn't work
+      without Security Manager.
+      When Hadoop 3.5.0 is released and HBase adds support for it, this can be removed, or moved
+      to a Hadoop version dependent profile.
+      This is NOT added to the startup scripts, as this is a major change, and the user better be
+      aware of this requirement (and add this in hbase-env.sh) and/or in their application
+    -->
+    <hbase-surefire.jdk18.flags>-Djava.security.manager=allow</hbase-surefire.jdk18.flags>
     <!-- Surefire argLine defaults to Linux, cygwin argLine is used in the os.windows profile -->
     <argLine>${hbase-surefire.argLine} @{jacocoArgLine}</argLine>
     <extra.enforcer.version>1.5.1</extra.enforcer.version>
@@ -790,8 +799,8 @@
     <vega-embed.version>6.29.0</vega-embed.version>
     <vega-lite.version>5.23.0</vega-lite.version>
     <!-- Required for testing LDAP integration -->
-    <apacheds.version>2.0.0.AM26</apacheds.version>
-    <ldap-api.version>2.0.0</ldap-api.version>
+    <apacheds.version>2.0.0.AM27</apacheds.version>
+    <ldap-api.version>2.1.7</ldap-api.version>
   </properties>
   <repositories>
     <repository>
@@ -1389,9 +1398,28 @@
         </exclusions>
       </dependency>
       <dependency>
-        <groupId>junit</groupId>
-        <artifactId>junit</artifactId>
-        <version>${junit.version}</version>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter-api</artifactId>
+        <version>${junit.jupiter.version}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter-engine</artifactId>
+        <version>${junit.jupiter.version}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter-params</artifactId>
+        <version>${junit.jupiter.version}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.junit.vintage</groupId>
+        <artifactId>junit-vintage-engine</artifactId>
+        <version>${junit.vintage.version}</version>
+        <scope>test</scope>
       </dependency>
       <dependency>
         <groupId>org.hamcrest</groupId>
@@ -1617,17 +1645,6 @@
       </dependency>
     </dependencies>
   </dependencyManagement>
-  <dependencies>
-    <!--REMOVE THIS. HERE TEMPORARILY.
-         Implication is that every module needs junit which is not so.
-         Cannot undo though because build runs test on each module and
-         it fails if no junit. TODO. -->
-    <dependency>
-      <groupId>junit</groupId>
-      <artifactId>junit</artifactId>
-      <scope>test</scope>
-    </dependency>
-  </dependencies>
   <build>
     <!-- Plugin versions are inherited from ASF parent pom: https://maven.apache.org/pom/asf/
          For specific version use a property and define it in the parent pom.
@@ -1713,18 +1730,9 @@
                 <name>listener</name>
                 <value>org.apache.hadoop.hbase.TimedOutTestsListener,org.apache.hadoop.hbase.HBaseClassTestRuleChecker,org.apache.hadoop.hbase.ResourceCheckerJUnitListener</value>
               </property>
+              <configurationParameters>junit.jupiter.extensions.autodetection.enabled=true</configurationParameters>
             </properties>
           </configuration>
-          <dependencies>
-            <!-- by default surefire selects dynamically the connector to the unit tests
-              tool. We want to use always the same as the different connectors can have different
-              bugs and behaviour. -->
-            <dependency>
-              <groupId>org.apache.maven.surefire</groupId>
-              <artifactId>${surefire.provider}</artifactId>
-              <version>${surefire.version}</version>
-            </dependency>
-          </dependencies>
           <executions>
             <execution>
               <id>secondPartTestsExecution</id>
@@ -3124,6 +3132,19 @@
       <properties>
         <argLine>${hbase-surefire.jdk11.flags}
           ${hbase-surefire.jdk17.flags}
+          ${hbase-surefire.argLine}
+          @{jacocoArgLine}</argLine>
+      </properties>
+    </profile>
+    <profile>
+      <id>build-with-jdk18</id>
+      <activation>
+        <jdk>[18,)</jdk>
+      </activation>
+      <properties>
+        <argLine>${hbase-surefire.jdk11.flags}
+          ${hbase-surefire.jdk17.flags}
+          ${hbase-surefire.jdk18.flags}
           ${hbase-surefire.argLine}
           @{jacocoArgLine}</argLine>
       </properties>
@@ -4968,7 +4989,6 @@
         </property>
       </activation>
       <properties>
-        <surefire.provider>surefire-junit4</surefire.provider>
         <surefire.skipFirstPart>false</surefire.skipFirstPart>
         <surefire.skipSecondPart>true</surefire.skipSecondPart>
         <surefire.firstPartGroups/>

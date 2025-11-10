@@ -50,7 +50,9 @@ import org.apache.hadoop.hbase.snapshot.ClientSnapshotDescriptionUtils;
 import org.apache.hadoop.hbase.snapshot.CorruptedSnapshotException;
 import org.apache.hadoop.hbase.snapshot.SnapshotDescriptionUtils;
 import org.apache.hadoop.hbase.snapshot.SnapshotManifest;
+import org.apache.hadoop.hbase.snapshot.SnapshotTTLExpiredException;
 import org.apache.hadoop.hbase.util.CommonFSUtils;
+import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.ModifyRegionUtils;
 import org.apache.hadoop.hbase.util.RetryCounter;
 import org.apache.yetus.audience.InterfaceAudience;
@@ -62,6 +64,7 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.S
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.SnapshotState;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.ProcedureState;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription.Type;
 
 /**
  * A procedure used to take snapshot on tables.
@@ -119,14 +122,16 @@ public class SnapshotProcedure extends AbstractStateMachineTableProcedure<Snapsh
           setNextState(SnapshotState.SNAPSHOT_WRITE_SNAPSHOT_INFO);
           return Flow.HAS_MORE_STATE;
         case SNAPSHOT_WRITE_SNAPSHOT_INFO:
-          SnapshotDescriptionUtils.writeSnapshotInfo(snapshot, workingDir, workingDirFS);
           TableState tableState =
             env.getMasterServices().getTableStateManager().getTableState(snapshotTable);
           if (tableState.isEnabled()) {
             setNextState(SnapshotState.SNAPSHOT_SNAPSHOT_ONLINE_REGIONS);
           } else if (tableState.isDisabled()) {
+            // Set the snapshot type to DISABLED as the table is in DISABLED state
+            snapshot = snapshot.toBuilder().setType(Type.DISABLED).build();
             setNextState(SnapshotState.SNAPSHOT_SNAPSHOT_CLOSED_REGIONS);
           }
+          SnapshotDescriptionUtils.writeSnapshotInfo(snapshot, workingDir, workingDirFS);
           return Flow.HAS_MORE_STATE;
         case SNAPSHOT_SNAPSHOT_ONLINE_REGIONS:
           addChildProcedure(createRemoteSnapshotProcedures(env));
@@ -158,6 +163,12 @@ public class SnapshotProcedure extends AbstractStateMachineTableProcedure<Snapsh
         case SNAPSHOT_COMPLETE_SNAPSHOT:
           if (isSnapshotCorrupted()) {
             throw new CorruptedSnapshotException(snapshot.getName());
+          }
+          if (
+            SnapshotDescriptionUtils.isExpiredSnapshot(snapshot.getTtl(),
+              snapshot.getCreationTime(), EnvironmentEdgeManager.currentTime())
+          ) {
+            throw new SnapshotTTLExpiredException(ProtobufUtil.createSnapshotDesc(snapshot));
           }
           completeSnapshot(env);
           setNextState(SnapshotState.SNAPSHOT_POST_OPERATION);

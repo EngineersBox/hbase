@@ -15,23 +15,30 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.hadoop.hbase.client;
+package org.apache.hadoop.hbase;
 
-import org.apache.hadoop.hbase.HBaseClassTestRule;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import java.lang.reflect.Field;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
-import org.apache.hadoop.hbase.testclassification.LargeTests;
-import org.junit.ClassRule;
-import org.junit.experimental.categories.Category;
+import org.apache.hadoop.hbase.testclassification.MiscTests;
+import org.apache.hadoop.hbase.testclassification.SmallTests;
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
 
-@Category({ ClientTests.class, LargeTests.class })
-public class TestAdminShell2 extends AbstractTestShell {
+/**
+ * Verify that the values are all correct.
+ */
+@Tag(MiscTests.TAG)
+@Tag(SmallTests.TAG)
+public class TestJUnit5TagConstants {
 
-  @ClassRule
-  public static final HBaseClassTestRule CLASS_RULE =
-    HBaseClassTestRule.forClass(TestAdminShell2.class);
-
-  @Override
-  protected String getIncludeList() {
-    return "admin2_test.rb";
+  @Test
+  public void testVerify() throws Exception {
+    ClassFinder finder = new ClassFinder(getClass().getClassLoader());
+    for (Class<?> annoClazz : finder.findClasses(ClientTests.class.getPackage().getName(), false)) {
+      Field field = annoClazz.getField("TAG");
+      assertEquals(annoClazz.getName(), field.get(null));
+    }
   }
 }

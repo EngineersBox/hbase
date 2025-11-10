@@ -40,9 +40,10 @@ import org.apache.hadoop.hbase.io.MetricsIO;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
 import org.apache.hadoop.hbase.io.hfile.ReaderContext.ReaderType;
-import org.apache.hadoop.hbase.ipc.RpcServer;
+import org.apache.hadoop.hbase.monitoring.ThreadLocalServerSideScanMetrics;
 import org.apache.hadoop.hbase.regionserver.CellSink;
 import org.apache.hadoop.hbase.regionserver.ShipperListener;
+import org.apache.hadoop.hbase.regionserver.TimeRangeTracker;
 import org.apache.hadoop.hbase.util.BloomFilterWriter;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
@@ -189,7 +190,7 @@ public final class HFile {
   }
 
   public static final void updateReadLatency(long latencyMillis, boolean pread, boolean tooSlow) {
-    RpcServer.getCurrentCall().ifPresent(call -> call.updateFsReadTime(latencyMillis));
+    ThreadLocalServerSideScanMetrics.addFsReadTime(latencyMillis);
     if (pread) {
       MetricsIO.getInstance().updateFsPreadTime(latencyMillis);
     } else {
@@ -211,6 +212,17 @@ public final class HFile {
 
     /** Add an element to the file info map. */
     void appendFileInfo(byte[] key, byte[] value) throws IOException;
+
+    /**
+     * Add TimestampRange and earliest put timestamp to Metadata
+     */
+    void appendTrackedTimestampsToMetadata() throws IOException;
+
+    /**
+     * Add Custom cell timestamp to Metadata
+     */
+    public void appendCustomCellTimestampsToMetadata(TimeRangeTracker timeRangeTracker)
+      throws IOException;
 
     /** Returns the path to this {@link HFile} */
     Path getPath();

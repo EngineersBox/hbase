@@ -644,7 +644,7 @@ public class MergeTableRegionsProcedure
           // to read the hfiles.
           storeFileInfo.setConf(storeConfiguration);
           Path refFile = mergeRegionFs.mergeStoreFile(regionFs.getRegionInfo(), family,
-            new HStoreFile(storeFileInfo, hcd.getBloomFilterType(), CacheConfig.DISABLED));
+            new HStoreFile(storeFileInfo, hcd.getBloomFilterType(), CacheConfig.DISABLED), tracker);
           mergedFiles.add(refFile);
         }
       }
@@ -672,8 +672,8 @@ public class MergeTableRegionsProcedure
    **/
   private void rollbackCloseRegionsForMerge(MasterProcedureEnv env) throws IOException {
     // At this point we should check if region was actually closed. If it was not closed then we
-    // don't need to repoen the region and we can just change the regionNode state to OPEN.
-    // if it is alredy closed then we need to do a reopen of region
+    // don't need to reopen the region and we can just change the regionNode state to OPEN.
+    // if it is already closed then we need to do a reopen of region
     List<RegionInfo> toAssign = new ArrayList<>();
     for (RegionInfo rinfo : regionsToMerge) {
       RegionStateNode regionStateNode =

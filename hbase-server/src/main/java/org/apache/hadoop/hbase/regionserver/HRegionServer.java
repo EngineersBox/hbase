@@ -635,7 +635,7 @@ public class HRegionServer extends Thread
       this.dataFsOk = true;
       this.masterless = conf.getBoolean(MASTERLESS_CONFIG_NAME, false);
       this.eventLoopGroupConfig = setupNetty(this.conf);
-      MemorySizeUtil.checkForClusterFreeHeapMemoryLimit(this.conf);
+      MemorySizeUtil.validateRegionServerHeapMemoryAllocation(conf);
       HFile.checkHFileVersion(this.conf);
       checkCodecs(this.conf);
       this.userProvider = UserProvider.instantiate(conf);
@@ -700,6 +700,9 @@ public class HRegionServer extends Thread
       // no need to instantiate block cache and mob file cache when master not carry table
       if (!isMasterNotCarryTable) {
         blockCache = BlockCacheFactory.createBlockCache(conf);
+        // The call below, instantiates the DataTieringManager only when
+        // the configuration "hbase.regionserver.datatiering.enable" is set to true.
+        DataTieringManager.instantiate(conf, onlineRegions);
         mobFileCache = new MobFileCache(conf);
       }
 

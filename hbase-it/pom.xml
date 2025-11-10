@@ -186,8 +186,23 @@
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>junit</groupId>
-      <artifactId>junit</artifactId>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-api</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-engine</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-params</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.vintage</groupId>
+      <artifactId>junit-vintage-engine</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -285,7 +300,7 @@
         <artifactId>maven-failsafe-plugin</artifactId>
         <configuration>
           <skip>false</skip>
-          <forkMode>always</forkMode>
+          <reuseForks>false</reuseForks>
           <!-- TODO: failsafe does timeout, but verify does not fail the build because of the timeout.
                  I believe it is a failsafe bug, we may consider using surefire -->
           <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>

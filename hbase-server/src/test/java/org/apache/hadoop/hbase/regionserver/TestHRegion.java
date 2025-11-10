@@ -150,6 +150,8 @@ import org.apache.hadoop.hbase.regionserver.Region.Operation;
 import org.apache.hadoop.hbase.regionserver.Region.RowLock;
 import org.apache.hadoop.hbase.regionserver.TestHStore.FaultyFileSystem;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequestImpl;
+import org.apache.hadoop.hbase.regionserver.storefiletracker.StoreFileTracker;
+import org.apache.hadoop.hbase.regionserver.storefiletracker.StoreFileTrackerFactory;
 import org.apache.hadoop.hbase.regionserver.wal.FSHLog;
 import org.apache.hadoop.hbase.regionserver.wal.MetricsWALSource;
 import org.apache.hadoop.hbase.regionserver.wal.WALUtil;
@@ -5687,8 +5689,14 @@ public class TestHRegion {
       // move the file of the primary region to the archive, simulating a compaction
       Collection<HStoreFile> storeFiles = primaryRegion.getStore(families[0]).getStorefiles();
       primaryRegion.getRegionFileSystem().removeStoreFiles(Bytes.toString(families[0]), storeFiles);
-      Collection<StoreFileInfo> storeFileInfos =
-        primaryRegion.getRegionFileSystem().getStoreFiles(Bytes.toString(families[0]));
+      HRegionFileSystem regionFs = primaryRegion.getRegionFileSystem();
+      StoreFileTracker sft = StoreFileTrackerFactory.create(primaryRegion.getBaseConf(), false,
+        StoreContext.getBuilder()
+          .withColumnFamilyDescriptor(ColumnFamilyDescriptorBuilder.newBuilder(families[0]).build())
+          .withFamilyStoreDirectoryPath(
+            new Path(regionFs.getRegionDir(), Bytes.toString(families[0])))
+          .withRegionFileSystem(regionFs).build());
+      Collection<StoreFileInfo> storeFileInfos = sft.load();
       Assert.assertTrue(storeFileInfos == null || storeFileInfos.isEmpty());
 
       verifyData(secondaryRegion, 0, 1000, cq, families);
@@ -7493,12 +7501,13 @@ public class TestHRegion {
     final ServerName serverName = ServerName.valueOf(name.getMethodName(), 100, 42);
     final RegionServerServices rss = spy(TEST_UTIL.createMockRegionServerService(serverName));
 
-    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(name.getMethodName()));
-    htd.addFamily(new HColumnDescriptor(fam1));
-    HRegionInfo hri =
-      new HRegionInfo(htd.getTableName(), HConstants.EMPTY_BYTE_ARRAY, HConstants.EMPTY_BYTE_ARRAY);
-    region =
-      HRegion.openHRegion(hri, htd, rss.getWAL(hri), TEST_UTIL.getConfiguration(), rss, null);
+    TableDescriptor tableDescriptor =
+      TableDescriptorBuilder.newBuilder(TableName.valueOf(name.getMethodName()))
+        .setColumnFamily(ColumnFamilyDescriptorBuilder.of(fam1)).build();
+    RegionInfo hri = RegionInfoBuilder.newBuilder(tableDescriptor.getTableName()).build();
+    TEST_UTIL.createRegionDir(hri);
+    region = HRegion.openHRegion(hri, tableDescriptor, rss.getWAL(hri),
+      TEST_UTIL.getConfiguration(), rss, null);
 
     assertTrue(region.conf.getBoolean(HConstants.REPLICATION_BULKLOAD_ENABLE_KEY, false));
     String plugins = region.conf.get(CoprocessorHost.REGION_COPROCESSOR_CONF_KEY, "");
@@ -7855,5 +7864,78 @@ public class TestHRegion {
 
   public static class NoOpRegionCoprocessor implements RegionCoprocessor, RegionObserver {
     // a empty region coprocessor class
+  }
+
+  /**
+   * Test for HBASE-29662: HRegion.initialize() should fail when trying to recreate .regioninfo file
+   * after the region directory has been deleted. This validates that .regioninfo file creation does
+   * not create parent directories recursively.
+   */
+  @Test
+  public void testHRegionInitializeFailsWithDeletedRegionDir() throws Exception {
+    LOG.info("Testing HRegion initialize failure with deleted region directory");
+
+    TEST_UTIL = new HBaseTestingUtility();
+    Configuration conf = TEST_UTIL.getConfiguration();
+    Path testDir = TEST_UTIL.getDataTestDir("testHRegionInitFailure");
+    FileSystem fs = testDir.getFileSystem(conf);
+
+    // Create table descriptor
+    TableName tableName = TableName.valueOf("TestHRegionInitWithDeletedDir");
+    byte[] family = Bytes.toBytes("info");
+    TableDescriptor htd = TableDescriptorBuilder.newBuilder(tableName)
+      .setColumnFamily(ColumnFamilyDescriptorBuilder.of(family)).build();
+
+    // Create region info
+    RegionInfo regionInfo =
+      RegionInfoBuilder.newBuilder(tableName).setStartKey(null).setEndKey(null).build();
+
+    Path tableDir = CommonFSUtils.getTableDir(testDir, tableName);
+
+    // Create WAL for the region
+    WAL wal = HBaseTestingUtility.createWal(conf, testDir, regionInfo);
+
+    try {
+      // Create region normally (this should succeed and create region directory)
+      LOG.info("Creating region normally - should succeed");
+      HRegion region = HRegion.createHRegion(regionInfo, testDir, conf, htd, wal, true);
+
+      // Verify region directory exists
+      Path regionDir = new Path(tableDir, regionInfo.getEncodedName());
+      assertTrue("Region directory should exist after creation", fs.exists(regionDir));
+
+      Path regionInfoFile = new Path(regionDir, HRegionFileSystem.REGION_INFO_FILE);
+      assertTrue("Region info file should exist after creation", fs.exists(regionInfoFile));
+
+      // Delete the region directory (simulating external deletion or corruption)
+      assertTrue(fs.delete(regionDir, true));
+      assertFalse("Region directory should not exist after deletion", fs.exists(regionDir));
+
+      // Try to open/initialize the region again - this should fail
+      LOG.info("Attempting to re-initialize region with deleted directory - should fail");
+
+      // Create a new region instance (simulating region server restart or reopen)
+      HRegion newRegion = HRegion.newHRegion(tableDir, wal, fs, conf, regionInfo, htd, null);
+      // Try to initialize - this should fail because the regionDir doesn't exist
+      IOException regionInitializeException = null;
+      try {
+        newRegion.initialize(null);
+      } catch (IOException e) {
+        regionInitializeException = e;
+      }
+
+      // Verify the exception is related to missing parent directory
+      assertNotNull("Exception should be thrown", regionInitializeException);
+      String exceptionMessage = regionInitializeException.getMessage().toLowerCase();
+      assertTrue(exceptionMessage.contains("region directory does not exist"));
+      assertFalse("Region directory should still not exist after failed initialization",
+        fs.exists(regionDir));
+
+    } finally {
+      if (wal != null) {
+        wal.close();
+      }
+      TEST_UTIL.cleanupTestDir();
+    }
   }
 }

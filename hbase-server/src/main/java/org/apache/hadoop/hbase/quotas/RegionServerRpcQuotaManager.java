@@ -91,7 +91,9 @@ public class RegionServerRpcQuotaManager implements RpcQuotaManager, Configurati
   }
 
   public void reload() {
-    quotaCache.forceSynchronousCacheRefresh();
+    if (isQuotaEnabled()) {
+      quotaCache.forceSynchronousCacheRefresh();
+    }
   }
 
   @Override
@@ -196,6 +198,10 @@ public class RegionServerRpcQuotaManager implements RpcQuotaManager, Configurati
     } catch (RpcThrottlingException e) {
       LOG.debug("Throttling exception for user=" + ugi.getUserName() + " table=" + table + " scan="
         + scanRequest.getScannerId() + ": " + e.getMessage());
+
+      rsServices.getMetrics().recordThrottleException(e.getType(), quotaCache.getQuotaUserName(ugi),
+        table.getNameAsString());
+
       throw e;
     }
     return quota;
@@ -269,6 +275,10 @@ public class RegionServerRpcQuotaManager implements RpcQuotaManager, Configurati
     } catch (RpcThrottlingException e) {
       LOG.debug("Throttling exception for user=" + ugi.getUserName() + " table=" + table
         + " numWrites=" + numWrites + " numReads=" + numReads + ": " + e.getMessage());
+
+      rsServices.getMetrics().recordThrottleException(e.getType(), quotaCache.getQuotaUserName(ugi),
+        table.getNameAsString());
+
       throw e;
     }
     return quota;
