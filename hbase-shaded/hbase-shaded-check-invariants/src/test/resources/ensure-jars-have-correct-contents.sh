@@ -119,6 +119,9 @@ else
   allowed_expr+="|^org/apache/hadoop/metrics2"
 fi
 
+# Kairos library
+allowed_expr+="|^com/$|^com/engineersbox/$|^com/engineersbox/kairos/|^org/bytedeco/|^org/slf4j/"
+
 
 allowed_expr+=")"
 declare -i bad_artifacts=0
