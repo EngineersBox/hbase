@@ -381,7 +381,7 @@ public class ExecutorService {
         LOG.error("Failed to register data broker: " + result.name());
         throw new IllegalStateException("Failed to register data broker: " + result.name());
       }
-      LOG.debug("Registered data broker: " + DATA_BROKER_NAME);
+      LOG.info("Registered data broker: " + DATA_BROKER_NAME);
     }
 
     private void initScheduler(final String schedulerLibName) {
@@ -405,7 +405,7 @@ public class ExecutorService {
         LOG.error("Failed to run scheduler: " + result.name());
         throw new IllegalStateException("Failed to run scheduler: " + result.name());
       }
-      LOG.debug("Started scheduler " + this.name + " with library " + schedulerLibName);
+      LOG.info("Started scheduler " + this.name + " with library " + schedulerLibName);
     }
 
     /**
@@ -434,7 +434,7 @@ public class ExecutorService {
         LOG.error("Failed to submit task: " + result.name());
         throw new IllegalStateException("Failed to submit task: " + result.name());
       }
-      LOG.debug("Submitted task to scheduler " + this.name);
+      LOG.info("Submitted task to scheduler " + this.name);
     }
 
     TrackingThreadPoolExecutor getThreadPoolExecutor() {
