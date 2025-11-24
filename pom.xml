@@ -619,8 +619,8 @@
     <thrift.version>0.14.1</thrift.version>
     <zookeeper.version>3.8.4</zookeeper.version>
     <jline.version>2.11</jline.version>
-<!--    <slf4j.version>1.7.33</slf4j.version>-->
-    <slf4j.version>2.0.17</slf4j.version>
+    <slf4j.version>1.7.33</slf4j.version>
+<!--    <slf4j.version>2.0.17</slf4j.version>-->
     <clover.version>4.0.3</clover.version>
     <jamon-runtime.version>2.4.1</jamon-runtime.version>
     <jettison.version>1.5.4</jettison.version>
@@ -802,6 +802,8 @@
     <!-- Required for testing LDAP integration -->
     <apacheds.version>2.0.0.AM27</apacheds.version>
     <ldap-api.version>2.1.7</ldap-api.version>
+    <hadoop.profile>3.0</hadoop.profile>
+    <skipTests>true</skipTests>
   </properties>
   <repositories>
     <repository>
@@ -1161,7 +1163,7 @@
       </dependency>
       <!--
         Logging dependencies. In general, we use slf4j as the log facade in HBase, so all sub
-        modules should depend on slf4j-api at compile scope, and then depend on log4j-slf4j2-impl
+        modules should depend on slf4j-api at compile scope, and then depend on log4j-slf4j-impl
         and log4j2 at test scope(and in hbase-assembly when shipping the binary) to redirect the
         log message to log4j. Do not introduce logging dependencies other than slf4j-api at compile
         scope as it will mess up the logging framework for downstream users.
@@ -1202,7 +1204,7 @@
       </dependency>
       <dependency>
         <groupId>org.apache.logging.log4j</groupId>
-        <artifactId>log4j-slf4j2-impl</artifactId>
+        <artifactId>log4j-slf4j-impl</artifactId>
         <version>${log4j2.version}</version>
       </dependency>
       <dependency>
@@ -2265,7 +2267,7 @@
                   <excludes>
                     <exclude>org.slf4j:slf4j-log4j12</exclude>
                   </excludes>
-                  <message>We do not allow slf4j-log4j12 dependency as now we use log4j-slf4j2-impl</message>
+                  <message>We do not allow slf4j-log4j12 dependency as now we use log4j-slf4j-impl</message>
                 </bannedDependencies>
               </rules>
             </configuration>
