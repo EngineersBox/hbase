@@ -88,6 +88,7 @@ function sighup_handler
 
 function sigterm_handler
 {
+  echo "[sigterm_handler] Trapped signal: $1"
   if [ -f "${HBASE_PID}" ]; then
     kill -s TERM "$(cat "${HBASE_PID}")"
     waitForProcessEnd "$(cat "${HBASE_PID}")" "${command}"
@@ -239,7 +240,9 @@ case $startStop in
 
 (foreground_start)
     trap sighup_handler HUP
-    trap sigterm_handler INT TERM EXIT
+    trap 'sigterm_handler INT' INT
+    trap 'sigterm_handler TERM' TERM
+    trap 'sigterm_handler EXIT' EXIT
 
     if [ "$HBASE_NO_REDIRECT_LOG" != "" ]; then
         # NO REDIRECT
