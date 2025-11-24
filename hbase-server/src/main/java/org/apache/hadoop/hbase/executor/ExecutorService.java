@@ -90,17 +90,21 @@ public class ExecutorService {
   static {
     KAIROS = Kairos.kairos_new();
     if (KAIROS == null || KAIROS.isNull()) {
+      LOG.error("Failed to initialise Kairos");
       throw new IllegalStateException("Failed to initialise Kairos");
     }
+    LOG.info("Initialised Kairos");
     Runtime.getRuntime().addShutdownHook(new Thread() {
       @Override
       public void run() {
         try {
           final Kairos.KairosResult result = Kairos.kairos_free(KAIROS).intern();
           if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
+            LOG.error("Failed to destroy Kairos: " + result);
             throw new IllegalStateException("Failed to destroy Kairos: " + result);
           }
         } finally {
+          LOG.info("Destroyed Kairos");
           KAIROS.deallocate();
         }
       }
@@ -374,13 +378,15 @@ public class ExecutorService {
         bootstrapFn
       ).intern();
       if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
+        LOG.error("Failed to register data broker: " + result.name());
         throw new IllegalStateException("Failed to register data broker: " + result.name());
       }
+      LOG.debug("Registered data broker: " + DATA_BROKER_NAME);
     }
 
     private void initScheduler(final String schedulerLibName) {
       final DylibSpecifier schedulerDylib = this.scope.attachTransparent(new DylibSpecifier());
-      schedulerDylib.instanceName(SliceUtils.fromString(name, this.scope));
+      schedulerDylib.instanceName(SliceUtils.fromString(this.name, this.scope));
       schedulerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
       schedulerDylib.name(SliceUtils.fromString(schedulerLibName, this.scope));
       final Kairos.KairosResult result = Kairos.kairos_run_scheduler_dylib(
@@ -396,8 +402,10 @@ public class ExecutorService {
         ).intoBox())
       ).intern();
       if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
+        LOG.error("Failed to run scheduler: " + result.name());
         throw new IllegalStateException("Failed to run scheduler: " + result.name());
       }
+      LOG.debug("Started scheduler " + this.name + " with library " + schedulerLibName);
     }
 
     /**
@@ -414,7 +422,7 @@ public class ExecutorService {
       });
       final Kairos.KairosResult result = Kairos.kairos_submit(
         ExecutorService.KAIROS,
-        SliceUtils.fromString(name, this.scope),
+        SliceUtils.fromString(this.name, this.scope),
         TaskUtils.create(
           0,
           null,
@@ -423,8 +431,10 @@ public class ExecutorService {
         )
       ).intern();
       if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
+        LOG.error("Failed to submit task: " + result.name());
         throw new IllegalStateException("Failed to submit task: " + result.name());
       }
+      LOG.debug("Submitted task to scheduler " + this.name);
     }
 
     TrackingThreadPoolExecutor getThreadPoolExecutor() {
