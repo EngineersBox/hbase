@@ -347,6 +347,10 @@ public class ExecutorService {
     private void registerBrokers() {
       final DylibSpecifier brokerDylib = this.scope.attachTransparent(new DylibSpecifier());
       brokerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
+      // FIXME: This name seems to be null or empty when it gets to Kairos.
+      //        Rebuild kairos with changes to see where this occurs. Not
+      //        sure why it would be empty since string data is copied into
+      //        a byte array allocated off-heap which is not GC'd.
       brokerDylib.name(SliceUtils.fromString(DATA_BROKER_NAME, this.scope));
       final DataBrokerBootstrapFn bootstrapFn = this.scope.attachTransparent(new DataBrokerBootstrapFn() {
         @Override
