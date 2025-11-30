@@ -369,7 +369,7 @@ public class ExecutorService {
             DATA_BROKER_NAME,
             publisher
           );
-          return OptionalUtils.none(scope);
+          return OptionalUtils.none();
         }
       });
       final DataBrokerProperties properties = scope.attachTransparent(new DataBrokerProperties(scope))
@@ -541,7 +541,7 @@ public class ExecutorService {
           final TaskRunnableBox taskRunnableBox,
           final Pointer pointer) {
           executor.submit(TaskUtils.intoRunnable(taskRunnableBox, pointer));
-          return OptionalUtils.none(scope);
+          return OptionalUtils.none();
         }
       });
       group.saturateBox(workerGroupBox);
