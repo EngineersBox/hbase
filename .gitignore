@@ -25,3 +25,4 @@ tmp
 **/.flattened-pom.xml
 .vscode/
 **/.factorypath
+jars/
