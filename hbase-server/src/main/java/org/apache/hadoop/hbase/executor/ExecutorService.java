@@ -428,7 +428,7 @@ public class ExecutorService {
         ExecutorService.KAIROS,
         SliceUtils.fromString(this.name, this.scope),
         TaskUtils.create(
-          0,
+          event.getSeqid(),
           null,
           task,
           this.scope
