@@ -341,17 +341,17 @@ public class ExecutorService {
       tfb.setDaemon(true);
       tfb.setUncaughtExceptionHandler(Threads.LOGGING_EXCEPTION_HANDLER);
       this.threadPoolExecutor.setThreadFactory(tfb.build());
-      registerBrokers();
+//      registerBrokers();
       initScheduler(config.getSchedulerLibName());
     }
+
+    @SuppressWarnings("unused")
     private void registerBrokers() {
       final DylibSpecifier brokerDylib = this.scope.attachTransparent(new DylibSpecifier());
       brokerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
-      // FIXME: This name seems to be null or empty when it gets to Kairos.
-      //        Rebuild kairos with changes to see where this occurs. Not
-      //        sure why it would be empty since string data is copied into
-      //        a byte array allocated off-heap which is not GC'd.
-      brokerDylib.name(SliceUtils.fromString(DATA_BROKER_NAME, this.scope));
+      // FIXME: This data broker name cannot be global as each thread pool gets its own.
+      //        Find a better way of naming these
+      brokerDylib.name(SliceUtils.fromString(this.name + "_" + DATA_BROKER_NAME, this.scope));
       final DataBrokerBootstrapFn bootstrapFn = this.scope.attachTransparent(new DataBrokerBootstrapFn() {
         @Override
         public OptionalGenericError call(final DataBrokerPlugin plugin) {
@@ -366,7 +366,7 @@ public class ExecutorService {
             return OptionalUtils.some(Kairos.GenericError.GENERIC_ERROR_FAILED, scope);
           }
           publishers.put(
-            DATA_BROKER_NAME,
+            Executor.this.name + "_" + DATA_BROKER_NAME,
             publisher
           );
           return OptionalUtils.none();
@@ -382,10 +382,10 @@ public class ExecutorService {
         bootstrapFn
       ).intern();
       if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
-        LOG.error("Failed to register data broker: " + result.name());
+        LOG.error("Failed to register data broker: {}", result.name());
         throw new IllegalStateException("Failed to register data broker: " + result.name());
       }
-      LOG.info("Registered data broker: " + DATA_BROKER_NAME);
+      LOG.info("Registered data broker: {}", DATA_BROKER_NAME);
     }
 
     private void initScheduler(final String schedulerLibName) {
@@ -406,10 +406,10 @@ public class ExecutorService {
         ).intoBox())
       ).intern();
       if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
-        LOG.error("Failed to run scheduler: " + result.name());
+        LOG.error("Failed to run scheduler: {}", result.name());
         throw new IllegalStateException("Failed to run scheduler: " + result.name());
       }
-      LOG.info("Started scheduler " + this.name + " with library " + schedulerLibName);
+      LOG.info("Started scheduler {} with library {}", this.name, schedulerLibName);
     }
 
     /**
