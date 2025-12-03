@@ -38,6 +38,7 @@ import com.engineersbox.kairos.DylibSpecifier;
 import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.OptionalGenericError;
 import com.engineersbox.kairos.SliceU8;
+import com.engineersbox.kairos.Task;
 import com.engineersbox.kairos.TaskRunnable;
 import com.engineersbox.kairos.TaskRunnableBox;
 import com.engineersbox.kairos.TaskRunnableContainer;
@@ -50,6 +51,7 @@ import com.engineersbox.kairos.WorkerGroupProviderContainer;
 import com.engineersbox.kairos.collection.HashCMap;
 import com.engineersbox.kairos.conversion.IntoBox;
 import com.engineersbox.kairos.logging.SLF4JLoggerDrain;
+import com.engineersbox.kairos.scope.ManagedPointerGroup;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
 import com.engineersbox.kairos.utils.OptionalUtils;
 import com.engineersbox.kairos.utils.SliceUtils;
@@ -309,25 +311,44 @@ public class ExecutorService {
 
   }
 
+  private static class TaskManager {
+    public TaskRunnable taskRunnable;
+    public Task task;
+
+    private final TransparentPointerScope scope;
+
+    public TaskManager(final TransparentPointerScope scope) {
+      this.scope = scope;
+    }
+
+    public void releaseAll() {
+      this.scope.detach(taskRunnable);
+      this.scope.detach(task.runnable());
+      this.scope.detach(task);
+    }
+  }
+
   /**
    * Executor instance.
    */
   static class Executor {
     public static final String DATA_BROKER_NAME = "example_broker";
+    private static final AtomicLong seqids = new AtomicLong(0);
     // the thread pool executor that services the requests
     final TrackingThreadPoolExecutor threadPoolExecutor;
     // work queue to use - unbounded queue
     final BlockingQueue<Runnable> q = new LinkedBlockingQueue<>();
     private final ConcurrentMap<String, DataPublisherBox> publishers;
     private final String name;
-    private static final AtomicLong seqids = new AtomicLong(0);
+    private final SliceU8 sliceName;
     private final long id;
     private final TransparentPointerScope scope;
 
     protected Executor(final ExecutorConfig config) {
-      this.id = seqids.incrementAndGet();
-      this.name = config.getName();
+      this.id = Executor.seqids.incrementAndGet();
       this.scope = new TransparentPointerScope();
+      this.name = config.getName();
+      this.sliceName = SliceUtils.fromString(this.name, this.scope);
       this.publishers = new ConcurrentHashMap<>();
       // create the thread pool executor
       this.threadPoolExecutor = new TrackingThreadPoolExecutor(
@@ -390,19 +411,19 @@ public class ExecutorService {
 
     private void initScheduler(final String schedulerLibName) {
       final DylibSpecifier schedulerDylib = this.scope.attachTransparent(new DylibSpecifier());
-      schedulerDylib.instanceName(SliceUtils.fromString(this.name, this.scope));
+      schedulerDylib.instanceName(this.sliceName);
       schedulerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
       schedulerDylib.name(SliceUtils.fromString(schedulerLibName, this.scope));
       final Kairos.KairosResult result = Kairos.kairos_run_scheduler_dylib(
         ExecutorService.KAIROS,
         schedulerDylib,
-        scope.attachTransparent(new TrackingThreadPoolProvider(
-          scope,
-          threadPoolExecutor
+        this.scope.attachTransparent(new TrackingThreadPoolProvider(
+          this.scope,
+          this.threadPoolExecutor
         ).intoBox()),
-        scope.attachTransparent(new SLF4JLoggerDrain(
+        this.scope.attachTransparent(new SLF4JLoggerDrain(
           this.toString(),
-          scope
+          this.scope
         ).intoBox())
       ).intern();
       if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
@@ -416,29 +437,32 @@ public class ExecutorService {
      * Submit the event to the queue for handling.
      */
     void submit(final EventHandler event) {
-      final TaskRunnable task = scope.attachTransparent(new TaskRunnable() {
+      final ManagedPointerGroup pointerGroup = this.scope.createManagedPointerGroup();
+      final TaskRunnable taskRunnable = pointerGroup.attachTransparent(new TaskRunnable() {
         @Override
         public void run(final TaskRunnableContainer cont, final Pointer context) {
           // If there is a listener for this type, make sure we call the before
           // and after process methods.
           event.run();
+          pointerGroup.close();
         }
       });
+      final Task task = TaskUtils.create(
+        event.getSeqid(),
+        null,
+        taskRunnable,
+        pointerGroup
+      );
       final Kairos.KairosResult result = Kairos.kairos_submit(
         ExecutorService.KAIROS,
-        SliceUtils.fromString(this.name, this.scope),
-        TaskUtils.create(
-          event.getSeqid(),
-          null,
-          task,
-          this.scope
-        )
+        this.sliceName,
+        task
       ).intern();
       if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
-        LOG.error("Failed to submit task: " + result.name());
+        LOG.error("Failed to submit task: {}", result.name());
         throw new IllegalStateException("Failed to submit task: " + result.name());
       }
-      LOG.info("Submitted task to scheduler " + this.name);
+      LOG.trace("Submitted task {} to scheduler {}", event.getSeqid(), this.name);
     }
 
     TrackingThreadPoolExecutor getThreadPoolExecutor() {
