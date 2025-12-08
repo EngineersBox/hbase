@@ -443,8 +443,11 @@ public class ExecutorService {
         public void run(final TaskRunnableContainer cont, final Pointer context) {
           // If there is a listener for this type, make sure we call the before
           // and after process methods.
+          LOG.trace("[{}] Running task {}", Executor.this.name, event.getSeqid());
           event.run();
+          LOG.trace("[{}] Freeing task resources", Executor.this.name);
           pointerGroup.close();
+          LOG.trace("[{}] Done task", Executor.this.name);
         }
       });
       final Task task = TaskUtils.create(
