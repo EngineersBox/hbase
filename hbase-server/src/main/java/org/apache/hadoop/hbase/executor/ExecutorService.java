@@ -90,7 +90,7 @@ public class ExecutorService {
   private static final BytePointer KAIROS;
 
   static {
-    KAIROS = Kairos.kairos_new();
+    KAIROS = Kairos.create();
     if (KAIROS == null || KAIROS.isNull()) {
       LOG.error("Failed to initialise Kairos");
       throw new IllegalStateException("Failed to initialise Kairos");
@@ -100,7 +100,7 @@ public class ExecutorService {
       @Override
       public void run() {
         try {
-          final Kairos.KairosResult result = Kairos.kairos_free(KAIROS).intern();
+          final Kairos.KairosResult result = Kairos.free(KAIROS).intern();
           if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
             LOG.error("Failed to destroy Kairos: " + result);
             throw new IllegalStateException("Failed to destroy Kairos: " + result);
@@ -378,7 +378,7 @@ public class ExecutorService {
         public OptionalGenericError call(final DataBrokerPlugin plugin) {
           final DataPublisherBox publisher = scope.attachTransparent(new DataPublisherBox());
           final SliceU8 topic = SliceUtils.fromString(name, scope);
-          final int result = plugin.vtbl_databroker().publish().call(
+          final int result = plugin.vtbl_databroker().publisher().call(
             plugin.container(),
             topic,
             publisher
@@ -395,7 +395,7 @@ public class ExecutorService {
       });
       final DataBrokerProperties properties = scope.attachTransparent(new DataBrokerProperties(scope))
         .queueSize(10);
-      final Kairos.KairosResult result = Kairos.kairos_register_data_broker_dylib(
+      final Kairos.KairosResult result = Kairos.registerDataBrokerDylib(
         ExecutorService.KAIROS,
         brokerDylib,
         scope.attachTransparent(properties.intoBox()),
@@ -414,7 +414,7 @@ public class ExecutorService {
       schedulerDylib.instanceName(this.sliceName);
       schedulerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
       schedulerDylib.name(SliceUtils.fromString(schedulerLibName, this.scope));
-      final Kairos.KairosResult result = Kairos.kairos_run_scheduler_dylib(
+      final Kairos.KairosResult result = Kairos.runSchedulerDylib(
         ExecutorService.KAIROS,
         schedulerDylib,
         this.scope.attachTransparent(new TrackingThreadPoolProvider(
@@ -443,20 +443,20 @@ public class ExecutorService {
         public void run(final TaskRunnableContainer cont, final Pointer context) {
           // If there is a listener for this type, make sure we call the before
           // and after process methods.
-          LOG.trace("[{}] Running task {}", Executor.this.name, event.getSeqid());
+          LOG.debug("[{}] Running task {}", Executor.this.name, event.getSeqid());
           event.run();
-          LOG.trace("[{}] Freeing task resources", Executor.this.name);
+          LOG.debug("[{}] Freeing task resources", Executor.this.name);
           pointerGroup.close();
-          LOG.trace("[{}] Done task", Executor.this.name);
+          LOG.debug("[{}] Done task", Executor.this.name);
         }
       });
       final Task task = TaskUtils.create(
-        event.getSeqid(),
+        (int) event.getSeqid(),
         null,
         taskRunnable,
         pointerGroup
       );
-      final Kairos.KairosResult result = Kairos.kairos_submit(
+      final Kairos.KairosResult result = Kairos.submit(
         ExecutorService.KAIROS,
         this.sliceName,
         task
@@ -465,7 +465,7 @@ public class ExecutorService {
         LOG.error("Failed to submit task: {}", result.name());
         throw new IllegalStateException("Failed to submit task: " + result.name());
       }
-      LOG.trace("Submitted task {} to scheduler {}", event.getSeqid(), this.name);
+      LOG.debug("Submitted task {} to scheduler {}", event.getSeqid(), this.name);
     }
 
     TrackingThreadPoolExecutor getThreadPoolExecutor() {

@@ -1,5 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="HMaster" type="Application" factoryName="Application" nameIsGenerated="true">
+  <configuration default="false" name="LocalHBaseCluster" type="Application" factoryName="Application" nameIsGenerated="true">
     <classpathModifications>
       <entry path="$PROJECT_DIR$/jars/*" />
       <entry path="$PROJECT_DIR$/jars/lib/*" />
@@ -13,12 +13,11 @@
       <env name="HBASE_HOME" value="$PROJECT_DIR$" />
     </envs>
     <option name="VM_PARAMETERS" value="-Dkairos.library.path=&quot;$PROJECT_DIR$/../kairos/target/debug/&quot;" />
-    <option name="MAIN_CLASS_NAME" value="org.apache.hadoop.hbase.master.HMaster" />
+    <option name="MAIN_CLASS_NAME" value="org.apache.hadoop.hbase.LocalHBaseCluster" />
     <module name="hbase-server" />
-    <option name="PROGRAM_PARAMETERS" value="start --masters=1 --minRegionServers=1" />
     <extension name="coverage">
       <pattern>
-        <option name="PATTERN" value="org.apache.hadoop.hbase.master.*" />
+        <option name="PATTERN" value="org.apache.hadoop.hbase.*" />
         <option name="ENABLED" value="true" />
       </pattern>
     </extension>
