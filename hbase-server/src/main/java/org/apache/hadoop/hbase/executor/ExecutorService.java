@@ -20,6 +20,7 @@ package org.apache.hadoop.hbase.executor;
 import java.io.IOException;
 import java.io.Writer;
 import java.lang.management.ThreadInfo;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -311,23 +312,6 @@ public class ExecutorService {
 
   }
 
-  private static class TaskManager {
-    public TaskRunnable taskRunnable;
-    public Task task;
-
-    private final TransparentPointerScope scope;
-
-    public TaskManager(final TransparentPointerScope scope) {
-      this.scope = scope;
-    }
-
-    public void releaseAll() {
-      this.scope.detach(taskRunnable);
-      this.scope.detach(task.runnable());
-      this.scope.detach(task);
-    }
-  }
-
   /**
    * Executor instance.
    */
@@ -463,6 +447,7 @@ public class ExecutorService {
       ).intern();
       if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
         LOG.error("Failed to submit task: {}", result.name());
+        pointerGroup.close();
         throw new IllegalStateException("Failed to submit task: " + result.name());
       }
       LOG.debug("Submitted task {} to scheduler {}", event.getSeqid(), this.name);

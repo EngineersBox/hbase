@@ -1,6 +1,7 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="HMaster" type="Application" factoryName="Application" nameIsGenerated="true">
     <classpathModifications>
+      <entry path="$PROJECT_DIR$/local_conf/*" />
       <entry path="$PROJECT_DIR$/jars/*" />
       <entry path="$PROJECT_DIR$/jars/lib/*" />
       <entry path="$PROJECT_DIR$/jars/lib/jdk11/*" />
@@ -12,16 +13,29 @@
       <env name="RUST_BACKTRACE" value="full" />
       <env name="HBASE_HOME" value="$PROJECT_DIR$" />
     </envs>
-    <option name="VM_PARAMETERS" value="-Dkairos.library.path=&quot;$PROJECT_DIR$/../kairos/target/debug/&quot;" />
     <option name="MAIN_CLASS_NAME" value="org.apache.hadoop.hbase.master.HMaster" />
     <module name="hbase-server" />
-    <option name="PROGRAM_PARAMETERS" value="start --masters=1 --minRegionServers=1" />
+    <option name="PROGRAM_PARAMETERS" value="start --masters=1 --localRegionServers=1" />
+    <option name="VM_PARAMETERS" value="-Dkairos.library.path=&quot;$PROJECT_DIR$/../kairos/target/debug/&quot; -Dlog4j2.configurationFile=&quot;$PROJECT_DIR$/local_conf/log4j2.properties&quot; -Djava.util.logging.config.class=org.apache.hadoop.hbase.logging.JulToSlf4jInitializer" />
     <extension name="coverage">
       <pattern>
         <option name="PATTERN" value="org.apache.hadoop.hbase.master.*" />
         <option name="ENABLED" value="true" />
       </pattern>
     </extension>
-    <method v="2" />
+    <extension name="net.ashald.envfile">
+      <option name="IS_ENABLED" value="true" />
+      <option name="IS_SUBST" value="false" />
+      <option name="IS_PATH_MACRO_SUPPORTED" value="false" />
+      <option name="IS_IGNORE_MISSING_FILES" value="false" />
+      <option name="IS_ENABLE_EXPERIMENTAL_INTEGRATIONS" value="false" />
+      <ENTRIES>
+        <ENTRY IS_ENABLED="true" PARSER="runconfig" IS_EXECUTABLE="false" />
+        <ENTRY IS_ENABLED="true" PARSER="env" IS_EXECUTABLE="false" PATH="local_conf/local.env" />
+      </ENTRIES>
+    </extension>
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
   </configuration>
 </component>

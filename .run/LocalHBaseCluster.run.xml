@@ -12,9 +12,9 @@
       <env name="RUST_BACKTRACE" value="full" />
       <env name="HBASE_HOME" value="$PROJECT_DIR$" />
     </envs>
-    <option name="VM_PARAMETERS" value="-Dkairos.library.path=&quot;$PROJECT_DIR$/../kairos/target/debug/&quot;" />
     <option name="MAIN_CLASS_NAME" value="org.apache.hadoop.hbase.LocalHBaseCluster" />
     <module name="hbase-server" />
+    <option name="VM_PARAMETERS" value="-Dkairos.library.path=&quot;$PROJECT_DIR$/../kairos/target/debug/&quot;" />
     <extension name="coverage">
       <pattern>
         <option name="PATTERN" value="org.apache.hadoop.hbase.*" />
