@@ -383,7 +383,7 @@ public class ExecutorService {
         ExecutorService.KAIROS,
         brokerDylib,
         scope.attachTransparent(properties.intoBox()),
-        Kairos.new_dummy_logger_drain(),
+        Kairos.newDummyLoggerDrain(),
         bootstrapFn
       ).intern();
       if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
@@ -427,11 +427,8 @@ public class ExecutorService {
         public void run(final TaskRunnableContainer cont, final Pointer context) {
           // If there is a listener for this type, make sure we call the before
           // and after process methods.
-          LOG.debug("[{}] Running task {}", Executor.this.name, event.getSeqid());
           event.run();
-          LOG.debug("[{}] Freeing task resources", Executor.this.name);
           pointerGroup.close();
-          LOG.debug("[{}] Done task", Executor.this.name);
         }
       });
       final Task task = TaskUtils.create(
@@ -450,7 +447,6 @@ public class ExecutorService {
         pointerGroup.close();
         throw new IllegalStateException("Failed to submit task: " + result.name());
       }
-      LOG.debug("Submitted task {} to scheduler {}", event.getSeqid(), this.name);
     }
 
     TrackingThreadPoolExecutor getThreadPoolExecutor() {
