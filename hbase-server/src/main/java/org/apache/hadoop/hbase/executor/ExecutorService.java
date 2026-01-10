@@ -88,31 +88,6 @@ import org.apache.hbase.thirdparty.com.google.common.util.concurrent.ThreadFacto
 @InterfaceAudience.Private
 public class ExecutorService {
   private static final Logger LOG = LoggerFactory.getLogger(ExecutorService.class);
-  private static final BytePointer KAIROS;
-
-  static {
-    KAIROS = Kairos.create();
-    if (KAIROS == null || KAIROS.isNull()) {
-      LOG.error("Failed to initialise Kairos");
-      throw new IllegalStateException("Failed to initialise Kairos");
-    }
-    LOG.info("Initialised Kairos");
-    Runtime.getRuntime().addShutdownHook(new Thread() {
-      @Override
-      public void run() {
-        try {
-          final Kairos.KairosResult result = Kairos.free(KAIROS).intern();
-          if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
-            LOG.error("Failed to destroy Kairos: " + result);
-            throw new IllegalStateException("Failed to destroy Kairos: " + result);
-          }
-        } finally {
-          LOG.info("Destroyed Kairos");
-          KAIROS.deallocate();
-        }
-      }
-    });
-  }
 
   // hold the all the executors created in a map addressable by their names
   private final ConcurrentMap<String, Executor> executorMap = new ConcurrentHashMap<>();
@@ -380,7 +355,7 @@ public class ExecutorService {
       final DataBrokerProperties properties = scope.attachTransparent(new DataBrokerProperties(scope))
         .queueSize(10);
       final Kairos.KairosResult result = Kairos.registerDataBrokerDylib(
-        ExecutorService.KAIROS,
+        Scheduling.KAIROS,
         brokerDylib,
         scope.attachTransparent(properties.intoBox()),
         Kairos.newDummyLoggerDrain(),
@@ -399,7 +374,7 @@ public class ExecutorService {
       schedulerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
       schedulerDylib.name(SliceUtils.fromString(schedulerLibName, this.scope));
       final Kairos.KairosResult result = Kairos.runSchedulerDylib(
-        ExecutorService.KAIROS,
+        Scheduling.KAIROS,
         schedulerDylib,
         this.scope.attachTransparent(new TrackingThreadPoolProvider(
           this.scope,
@@ -438,7 +413,7 @@ public class ExecutorService {
         pointerGroup
       );
       final Kairos.KairosResult result = Kairos.submit(
-        ExecutorService.KAIROS,
+        Scheduling.KAIROS,
         this.sliceName,
         task
       ).intern();
