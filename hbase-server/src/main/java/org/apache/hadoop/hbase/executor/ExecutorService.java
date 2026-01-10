@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import com.engineersbox.kairos.DataBrokerBootstrapFn;
 import com.engineersbox.kairos.DataBrokerPlugin;
+import com.engineersbox.kairos.DataBrokerPluginArcBox;
 import com.engineersbox.kairos.DataPublisherBox;
 import com.engineersbox.kairos.DylibSpecifier;
 import com.engineersbox.kairos.Kairos;
@@ -334,7 +335,7 @@ public class ExecutorService {
       brokerDylib.name(SliceUtils.fromString(this.name + "_" + DATA_BROKER_NAME, this.scope));
       final DataBrokerBootstrapFn bootstrapFn = this.scope.attachTransparent(new DataBrokerBootstrapFn() {
         @Override
-        public OptionalGenericError call(final DataBrokerPlugin plugin) {
+        public OptionalGenericError call(final DataBrokerPluginArcBox plugin) {
           final DataPublisherBox publisher = scope.attachTransparent(new DataPublisherBox());
           final SliceU8 topic = SliceUtils.fromString(name, scope);
           final int result = plugin.vtbl_databroker().publisher().call(
