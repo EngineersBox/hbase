@@ -521,7 +521,12 @@ public class ExecutorService {
       final WorkerGroupBox workerGroupBox) {
       final WorkerGroup group = scope.attachTransparent(new WorkerGroup() {
         @Override
-        public OptionalGenericError assignWorker(final WorkerGroupContainer workerGroupContainer,
+        public int capabilities(WorkerGroupContainer workerGroupContainer) {
+          return Kairos.WG_CAP_ASSIGN;
+        }
+
+        @Override
+        public OptionalGenericError assign(final WorkerGroupContainer workerGroupContainer,
           final TaskRunnableBox taskRunnableBox,
           final Pointer pointer) {
           executor.submit(TaskUtils.intoRunnable(taskRunnableBox, pointer));
