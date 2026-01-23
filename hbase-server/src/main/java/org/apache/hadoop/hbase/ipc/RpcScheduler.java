@@ -21,6 +21,7 @@ import java.net.InetSocketAddress;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
+import org.bytedeco.javacpp.PointerScope;
 
 /**
  * An interface for RPC request scheduling algorithm.
@@ -131,4 +132,6 @@ public abstract class RpcScheduler {
 
   /** Retrieves the number of active write rpc handler when use RWQueueRpcExecutor. */
   public abstract int getActiveScanRpcHandlerCount();
+
+  public abstract PointerScope getPointerScope();
 }

@@ -19,12 +19,23 @@ package org.apache.hadoop.hbase.ipc;
 
 import java.util.Queue;
 import java.util.concurrent.atomic.AtomicInteger;
+import com.engineersbox.kairos.ArcVoid;
+import com.engineersbox.kairos.LoggerDrainBox;
+import com.engineersbox.kairos.SchedulerArgs;
+import com.engineersbox.kairos.SchedulerPluginArcBox;
+import com.engineersbox.kairos.SchedulerPluginCreator;
+import com.engineersbox.kairos.SliceU8;
+import com.engineersbox.kairos.Version;
+import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.SliceUtils;
+import com.google.common.base.Strings;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.conf.ConfigurationObserver;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
+import org.bytedeco.javacpp.Pointer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -67,8 +78,11 @@ public class RWQueueRpcExecutor extends RpcExecutor {
   private final AtomicInteger activeScanHandlerCount = new AtomicInteger(0);
 
   public RWQueueRpcExecutor(final String name, final int handlerCount, final int maxQueueLength,
-    final PriorityFunction priority, final Configuration conf, final Abortable abortable) {
-    super(name, handlerCount, maxQueueLength, priority, conf, abortable);
+    final PriorityFunction priority, final Configuration conf, final Abortable abortable,
+    final TransparentPointerScope scope, final SchedulerArgs schedulerArgs,
+    final LoggerDrainBox loggerDrain, final ArcVoid pluginCtx) {
+    super(name, handlerCount, maxQueueLength, priority, conf, abortable,
+      scope, schedulerArgs, loggerDrain, pluginCtx);
 
     float callqReadShare = getReadShare(conf);
     float callqScanShare = getScanShare(conf);
@@ -296,6 +310,67 @@ public class RWQueueRpcExecutor extends RpcExecutor {
   private void propagateBalancerConfigChange(QueueBalancer balancer, Configuration conf) {
     if (balancer instanceof ConfigurationObserver) {
       ((ConfigurationObserver) balancer).onConfigurationChange(conf);
+    }
+  }
+
+  public static class Creator extends SchedulerPluginCreator {
+
+    private final String name;
+    private final int handlerCount;
+    private final int maxQueueLength;
+    private final PriorityFunction priority;
+    private final Configuration conf;
+    private final Abortable abortable;
+
+    private final TransparentPointerScope runtimeScope;
+
+    private Creator(final SliceU8 name,  final int handlerCount, final int maxQueueLength,
+      final PriorityFunction priority, final Configuration conf, final Abortable abortable,
+      final SliceU8 description, final TransparentPointerScope runtimeScope) {
+      super(name, description);
+      this.name = SliceUtils.intoString(name);
+      this.handlerCount = handlerCount;
+      this.maxQueueLength = maxQueueLength;
+      this.priority = priority;
+      this.conf = conf;
+      this.abortable = abortable;
+      this.runtimeScope = runtimeScope;
+    }
+
+    public static Creator newInstance(final String name,final int handlerCount, final int maxQueueLength,
+      final PriorityFunction priority, final Configuration conf, final Abortable abortable,
+      final TransparentPointerScope runtimeScope) {
+      try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+        return new Creator(
+          SliceUtils.fromString(Strings.nullToEmpty(name), tempScope),
+          handlerCount,
+          maxQueueLength,
+          priority,
+          conf,
+          abortable,
+          SliceUtils.fromString("", tempScope),
+          runtimeScope
+        );
+      }
+    }
+
+    @Override
+    public int createSchedulerInstance(final SliceU8 name, final SchedulerArgs schedulerArgs,
+      final ArcVoid pluginCtx, final LoggerDrainBox loggerDrainBox, final SchedulerPluginArcBox schedulerPlugin) {
+      final RWQueueRpcExecutor executor = this.runtimeScope.attachTransparent(new RWQueueRpcExecutor(
+        this.name,
+        this.handlerCount,
+        this.maxQueueLength,
+        this.priority,
+        this.conf,
+        this.abortable,
+        new TransparentPointerScope(),
+        schedulerArgs,
+        loggerDrainBox,
+        pluginCtx
+      ));
+      executor.saturateArcBox(schedulerPlugin);
+      return 0;
     }
   }
 }

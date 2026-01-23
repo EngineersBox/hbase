@@ -1,66 +1,39 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 package org.apache.hadoop.hbase.ipc;
 
+import com.engineersbox.kairos.Kairos;
+import com.engineersbox.kairos.OptionalGenericError;
+import com.engineersbox.kairos.TaskRunnableBox;
+import com.engineersbox.kairos.WorkerGroup;
+import com.engineersbox.kairos.WorkerGroupContainer;
+import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.OptionalUtils;
+import com.engineersbox.kairos.utils.TaskUtils;
+import com.google.common.base.Preconditions;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.Abortable;
+import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.conf.ConfigurationObserver;
+import org.apache.hadoop.hbase.util.BoundedPriorityBlockingQueue;
+import org.apache.hadoop.hbase.util.ReflectionUtils;
+import org.apache.hbase.thirdparty.com.google.common.base.Strings;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.bytedeco.javacpp.Pointer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
 import java.util.Optional;
+import java.util.Queue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.function.Function;
-import java.util.stream.Collectors;
-import com.engineersbox.kairos.ArcVoid;
-import com.engineersbox.kairos.LoggerDrainBox;
-import com.engineersbox.kairos.SchedulerArgs;
-import com.engineersbox.kairos.SchedulerPlugin;
-import com.engineersbox.kairos.scope.TransparentPointerScope;
-import com.engineersbox.kairos.utils.SliceUtils;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.Abortable;
-import org.apache.hadoop.hbase.HBaseInterfaceAudience;
-import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.conf.ConfigurationObserver;
-import org.apache.hadoop.hbase.util.BoundedPriorityBlockingQueue;
-import org.apache.hadoop.hbase.util.Pair;
-import org.apache.hadoop.hbase.util.ReflectionUtils;
-import org.apache.yetus.audience.InterfaceAudience;
-import org.apache.yetus.audience.InterfaceStability;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
-import org.apache.hbase.thirdparty.com.google.common.base.Strings;
-import org.apache.hbase.thirdparty.com.google.protobuf.Descriptors;
+@InterfaceAudience.Private
+public class RpcHandlerPool extends WorkerGroup {
 
-/**
- * Runs the CallRunners passed here via {@link #dispatch(CallRunner)}. Subclass and add particular
- * scheduling behavior.
- */
-@InterfaceAudience.LimitedPrivate({ HBaseInterfaceAudience.COPROC, HBaseInterfaceAudience.PHOENIX })
-@InterfaceStability.Evolving
-public abstract class RpcExecutor extends SchedulerPlugin {
-  private static final Logger LOG = LoggerFactory.getLogger(RpcExecutor.class);
+  private static final Logger LOG = LoggerFactory.getLogger(RpcHandlerPool.class);
 
   protected static final int DEFAULT_CALL_QUEUE_SIZE_HARD_LIMIT = 250;
   public static final String CALL_QUEUE_HANDLER_FACTOR_CONF_KEY =
@@ -118,6 +91,8 @@ public abstract class RpcExecutor extends SchedulerPlugin {
   private final int handlerCount;
   private final AtomicInteger failedHandlerCount = new AtomicInteger(0);
 
+  private final QueueBalancer balancer;
+
   private String name;
 
   private final Configuration conf;
@@ -125,25 +100,19 @@ public abstract class RpcExecutor extends SchedulerPlugin {
 
   private final TransparentPointerScope scope;
 
-  public RpcExecutor(final String name, final int handlerCount, final int maxQueueLength,
-    final PriorityFunction priority, final Configuration conf, final Abortable abortable,
-    final TransparentPointerScope scope, final SchedulerArgs schedulerArgs,
-    final LoggerDrainBox loggerDrain, final ArcVoid pluginCtx) {
+  public RpcHandlerPool(final String name, final int handlerCount, final int maxQueueLength,
+    final PriorityFunction priority, final Configuration conf, final Abortable abortable) {
     this(name, handlerCount, conf.get(CALL_QUEUE_TYPE_CONF_KEY, CALL_QUEUE_TYPE_CONF_DEFAULT),
-      maxQueueLength, priority, conf, abortable, scope,
-      schedulerArgs, loggerDrain, pluginCtx);
+      maxQueueLength, priority, conf, abortable);
   }
 
-  public RpcExecutor(final String name, final int handlerCount, final String callQueueType,
+  public RpcHandlerPool(final String name, final int handlerCount, final String callQueueType,
     final int maxQueueLength, final PriorityFunction priority, final Configuration conf,
-    final Abortable abortable, final TransparentPointerScope scope, final SchedulerArgs schedulerArgs,
-    final LoggerDrainBox loggerDrain, final ArcVoid pluginCtx) {
-    super(SliceUtils.fromString(Strings.nullToEmpty(name), scope), schedulerArgs, loggerDrain, pluginCtx);
-    this.name = Strings.nullToEmpty(name);
+    final Abortable abortable) {
+    this.name = name;
     this.conf = conf;
     this.abortable = abortable;
-    this.scope = scope;
-
+    this.scope = new TransparentPointerScope();
     float callQueuesHandlersFactor = this.conf.getFloat(CALL_QUEUE_HANDLER_FACTOR_CONF_KEY, 0.1f);
     if (
       Float.compare(callQueuesHandlersFactor, 1.0f) > 0
@@ -198,42 +167,8 @@ public abstract class RpcExecutor extends SchedulerPlugin {
       this.queueInitArgs = new Object[] { maxQueueLength };
       this.queueClass = LinkedBlockingQueue.class;
     }
-
-    LOG.info(
-      "Instantiated {} with queueClass={}; "
-        + "numCallQueues={}, maxQueueLength={}, handlerCount={}",
-      this.name, this.queueClass, this.numCallQueues, maxQueueLength, this.handlerCount);
-  }
-
-  protected int computeNumCallQueues(final int handlerCount, final float callQueuesHandlersFactor) {
-    return Math.max(1, Math.round(handlerCount * callQueuesHandlersFactor));
-  }
-
-  /**
-   * Return the {@link Descriptors.MethodDescriptor#getName()} from {@code callRunner} or "Unknown".
-   */
-  private static String getMethodName(final CallRunner callRunner) {
-    return Optional.ofNullable(callRunner).map(CallRunner::getRpcCall).map(RpcCall::getMethod)
-      .map(Descriptors.MethodDescriptor::getName).orElse("Unknown");
-  }
-
-  /**
-   * Return the {@link RpcCall#getSize()} from {@code callRunner} or 0L.
-   */
-  private static long getRpcCallSize(final CallRunner callRunner) {
-    return Optional.ofNullable(callRunner).map(CallRunner::getRpcCall).map(RpcCall::getSize)
-      .orElse(0L);
-  }
-
-  public Map<String, Long> getCallQueueCountsSummary() {
-    return queues.stream().flatMap(Collection::stream).map(RpcExecutor::getMethodName)
-      .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()));
-  }
-
-  public Map<String, Long> getCallQueueSizeSummary() {
-    return queues.stream().flatMap(Collection::stream)
-      .map(callRunner -> new Pair<>(getMethodName(callRunner), getRpcCallSize(callRunner)))
-      .collect(Collectors.groupingBy(Pair::getFirst, Collectors.summingLong(Pair::getSecond)));
+    initializeQueues(this.numCallQueues);
+    this.balancer = getBalancer(name, conf, this.queues);
   }
 
   protected void initializeQueues(final int numQueues) {
@@ -246,21 +181,38 @@ public abstract class RpcExecutor extends SchedulerPlugin {
     }
   }
 
+  @Override
+  public int capabilities(final WorkerGroupContainer workerGroupContainer) {
+    return Kairos.WG_CAP_ASSIGN | Kairos.WG_CAP_RESIZE;
+  }
+
+  @Override
+  public OptionalGenericError assign(final WorkerGroupContainer container,
+    final TaskRunnableBox taskRunnable, final Pointer ctx) {
+    final CallRunner callRunner = (CallRunner) taskRunnable.container().instance().instance();
+    final int queueIndex = this.balancer.getNextQueue(callRunner);
+    final Queue<CallRunner> queue = this.queues.get(queueIndex);
+    if (queue.size() >= this.currentQueueLimit || !queue.offer(callRunner)) {
+      return OptionalUtils.some(Kairos.GenericError.GENERIC_ERROR_FAILED, this.scope);
+    }
+    return OptionalUtils.noneGenericError();
+  }
+
+  @Override
+  public OptionalGenericError resize(final WorkerGroupContainer workerGroupContainer,
+    final long newSize) {
+
+  }
+
+  @Override
+  public long size(final WorkerGroupContainer workerGroupContainer) {
+    return this.handlerCount;
+  }
+
   public void start(final int port) {
     startHandlers(port);
   }
 
-  public void stop() {
-    for (RpcHandler handler : handlers) {
-      handler.stopRunning();
-      handler.interrupt();
-    }
-  }
-
-  /** Add the request to the executor queue */
-  public abstract boolean dispatch(final CallRunner callTask);
-
-  /** Returns the list of request queues */
   protected List<BlockingQueue<CallRunner>> getQueues() {
     return queues;
   }
@@ -291,7 +243,7 @@ public abstract class RpcExecutor extends SchedulerPlugin {
     double handlerFailureThreshhold = conf == null
       ? 1.0
       : conf.getDouble(HConstants.REGION_SERVER_HANDLER_ABORT_ON_ERROR_PERCENT,
-        HConstants.DEFAULT_REGION_SERVER_HANDLER_ABORT_ON_ERROR_PERCENT);
+      HConstants.DEFAULT_REGION_SERVER_HANDLER_ABORT_ON_ERROR_PERCENT);
     for (int i = 0; i < numHandlers; i++) {
       final int index = qindex + (i % qsize);
       String name = "RpcServer." + threadPrefix + ".handler=" + handlers.size() + ",queue=" + index
@@ -305,49 +257,29 @@ public abstract class RpcExecutor extends SchedulerPlugin {
       handlers.size(), threadPrefix, qsize, port);
   }
 
-  /**
-   * All requests go to the first queue, at index 0
-   */
+  public void stop() {
+    for (RpcHandler handler : handlers) {
+      handler.stopRunning();
+      handler.interrupt();
+    }
+  }
+
+  protected int computeNumCallQueues(final int handlerCount, final float callQueuesHandlersFactor) {
+    return Math.max(1, Math.round(handlerCount * callQueuesHandlersFactor));
+  }
+
   private static final QueueBalancer ONE_QUEUE = val -> 0;
 
-  public static QueueBalancer getBalancer(final String executorName, final Configuration conf,
-    final List<BlockingQueue<CallRunner>> queues) {
-    Preconditions.checkArgument(queues.size() > 0, "Queue size is <= 0, must be at least 1");
+  public static QueueBalancer getBalancer(final String executorName,
+                                          final Configuration conf,
+                                          final List<BlockingQueue<CallRunner>> queues) {
+    Preconditions.checkArgument(!queues.isEmpty(), "Queue size is <= 0, must be at least 1");
     if (queues.size() == 1) {
       return ONE_QUEUE;
     } else {
       Class<?> balancerClass =
         conf.getClass(CALL_QUEUE_QUEUE_BALANCER_CLASS, CALL_QUEUE_QUEUE_BALANCER_CLASS_DEFAULT);
       return (QueueBalancer) ReflectionUtils.newInstance(balancerClass, conf, executorName, queues);
-    }
-  }
-
-  /**
-   * Comparator used by the "normal callQueue" if DEADLINE_CALL_QUEUE_CONF_KEY is set to true. It
-   * uses the calculated "deadline" e.g. to deprioritize long-running job If multiple requests have
-   * the same deadline BoundedPriorityBlockingQueue will order them in FIFO (first-in-first-out)
-   * manner.
-   */
-  private static class CallPriorityComparator implements Comparator<CallRunner> {
-    private final static int DEFAULT_MAX_CALL_DELAY = 5000;
-
-    private final PriorityFunction priority;
-    private final int maxDelay;
-
-    public CallPriorityComparator(final Configuration conf, final PriorityFunction priority) {
-      this.priority = priority;
-      this.maxDelay = conf.getInt(QUEUE_MAX_CALL_DELAY_CONF_KEY, DEFAULT_MAX_CALL_DELAY);
-    }
-
-    @Override
-    public int compare(CallRunner a, CallRunner b) {
-      RpcCall callA = a.getRpcCall();
-      RpcCall callB = b.getRpcCall();
-      long deadlineA = priority.getDeadline(callA.getHeader(), callA.getParam());
-      long deadlineB = priority.getDeadline(callB.getHeader(), callB.getParam());
-      deadlineA = callA.getReceiveTime() + Math.min(deadlineA, maxDelay);
-      deadlineB = callB.getReceiveTime() + Math.min(deadlineB, maxDelay);
-      return Long.compare(deadlineA, deadlineB);
     }
   }
 
@@ -370,6 +302,29 @@ public abstract class RpcExecutor extends SchedulerPlugin {
   public static boolean isPluggableQueueWithFastPath(String callQueueType, Configuration conf) {
     return isPluggableQueueType(callQueueType)
       && conf.getBoolean(PLUGGABLE_CALL_QUEUE_WITH_FAST_PATH_ENABLED, false);
+  }
+
+  private static class CallPriorityComparator implements Comparator<CallRunner> {
+    private final static int DEFAULT_MAX_CALL_DELAY = 5000;
+
+    private final PriorityFunction priority;
+    private final int maxDelay;
+
+    public CallPriorityComparator(final Configuration conf, final PriorityFunction priority) {
+      this.priority = priority;
+      this.maxDelay = conf.getInt(QUEUE_MAX_CALL_DELAY_CONF_KEY, DEFAULT_MAX_CALL_DELAY);
+    }
+
+    @Override
+    public int compare(CallRunner a, CallRunner b) {
+      RpcCall callA = a.getRpcCall();
+      RpcCall callB = b.getRpcCall();
+      long deadlineA = priority.getDeadline(callA.getHeader(), callA.getParam());
+      long deadlineB = priority.getDeadline(callB.getHeader(), callB.getParam());
+      deadlineA = callA.getReceiveTime() + Math.min(deadlineA, maxDelay);
+      deadlineB = callB.getReceiveTime() + Math.min(deadlineB, maxDelay);
+      return Long.compare(deadlineA, deadlineB);
+    }
   }
 
   private Optional<Class<? extends BlockingQueue<CallRunner>>> getPluggableQueueClass() {
@@ -397,83 +352,22 @@ public abstract class RpcExecutor extends SchedulerPlugin {
     }
   }
 
-  public long getNumGeneralCallsDropped() {
-    return numGeneralCallsDropped.longValue();
-  }
-
-  public long getNumLifoModeSwitches() {
-    return numLifoModeSwitches.longValue();
-  }
-
-  public int getActiveHandlerCount() {
-    return activeHandlerCount.get();
-  }
-
-  public int getActiveWriteHandlerCount() {
-    return 0;
-  }
-
-  public int getActiveReadHandlerCount() {
-    return 0;
-  }
-
-  public int getActiveScanHandlerCount() {
-    return 0;
-  }
-
-  /** Returns the length of the pending queue */
-  public int getQueueLength() {
-    int length = 0;
-    for (final BlockingQueue<CallRunner> queue : queues) {
-      length += queue.size();
+  private void propagateBalancerConfigChange(final QueueBalancer balancer, final Configuration updatedConf) {
+    if (balancer instanceof ConfigurationObserver) {
+      ((ConfigurationObserver) balancer).onConfigurationChange(updatedConf);
     }
-    return length;
   }
 
-  public int getReadQueueLength() {
-    return 0;
-  }
-
-  public int getScanQueueLength() {
-    return 0;
-  }
-
-  public int getWriteQueueLength() {
-    return 0;
-  }
-
-  public String getName() {
-    return this.name;
-  }
-
-  /**
-   * Update current soft limit for executor's call queues
-   * @param conf updated configuration
-   */
-  public void resizeQueues(Configuration conf) {
-    String configKey = RpcScheduler.IPC_SERVER_MAX_CALLQUEUE_LENGTH;
-    if (name != null) {
-      if (name.toLowerCase(Locale.ROOT).contains("priority")) {
-        configKey = RpcScheduler.IPC_SERVER_PRIORITY_MAX_CALLQUEUE_LENGTH;
-      } else if (name.toLowerCase(Locale.ROOT).contains("replication")) {
-        configKey = RpcScheduler.IPC_SERVER_REPLICATION_MAX_CALLQUEUE_LENGTH;
-      } else if (name.toLowerCase(Locale.ROOT).contains("bulkload")) {
-        configKey = RpcScheduler.IPC_SERVER_BULKLOAD_MAX_CALLQUEUE_LENGTH;
-      }
-    }
-    final int queueLimit = currentQueueLimit;
-    currentQueueLimit = conf.getInt(configKey, queueLimit);
-  }
-
-  public void onConfigurationChange(Configuration conf) {
+  public void onConfigurationChange(final Configuration updatedConf) {
+    propagateBalancerConfigChange(this.balancer, updatedConf);
     // update CoDel Scheduler tunables
-    int codelTargetDelay =
+    final int codelTargetDelay =
       conf.getInt(CALL_QUEUE_CODEL_TARGET_DELAY, CALL_QUEUE_CODEL_DEFAULT_TARGET_DELAY);
-    int codelInterval = conf.getInt(CALL_QUEUE_CODEL_INTERVAL, CALL_QUEUE_CODEL_DEFAULT_INTERVAL);
-    double codelLifoThreshold =
+    final int codelInterval = conf.getInt(CALL_QUEUE_CODEL_INTERVAL, CALL_QUEUE_CODEL_DEFAULT_INTERVAL);
+    final double codelLifoThreshold =
       conf.getDouble(CALL_QUEUE_CODEL_LIFO_THRESHOLD, CALL_QUEUE_CODEL_DEFAULT_LIFO_THRESHOLD);
 
-    for (BlockingQueue<CallRunner> queue : queues) {
+    for (final BlockingQueue<CallRunner> queue : queues) {
       if (queue instanceof AdaptiveLifoCoDelCallQueue) {
         ((AdaptiveLifoCoDelCallQueue) queue).updateTunables(codelTargetDelay, codelInterval,
           codelLifoThreshold);
@@ -482,4 +376,5 @@ public abstract class RpcExecutor extends SchedulerPlugin {
       }
     }
   }
+
 }

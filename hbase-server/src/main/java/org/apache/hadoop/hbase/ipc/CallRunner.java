@@ -17,6 +17,8 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
+import com.engineersbox.kairos.TaskRunnable;
+import com.engineersbox.kairos.TaskRunnableContainer;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.context.Scope;
@@ -37,6 +39,9 @@ import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 
 import org.apache.hbase.thirdparty.com.google.protobuf.Message;
+import org.bytedeco.javacpp.Pointer;
+import org.bytedeco.javacpp.PointerScope;
+import org.bytedeco.javacpp.annotation.Cast;
 
 /**
  * The request processing logic, which is usually executed in thread pools provided by an
@@ -44,7 +49,7 @@ import org.apache.hbase.thirdparty.com.google.protobuf.Message;
  */
 @InterfaceAudience.LimitedPrivate({ HBaseInterfaceAudience.COPROC, HBaseInterfaceAudience.PHOENIX })
 @InterfaceStability.Evolving
-public class CallRunner {
+public class CallRunner extends TaskRunnable {
 
   private static final CallDroppedException CALL_DROPPED_EXCEPTION = new CallDroppedException();
 
@@ -58,6 +63,9 @@ public class CallRunner {
    * On construction, adds the size of this call to the running count of outstanding call sizes.
    * Presumption is that we are put on a queue while we wait on an executor to run us. During this
    * time we occupy heap.
+   *
+   * The parentScope is the PointerScope instance used by the scheduler that owns this task,
+   * it is used to self-deallocate the task once it has completed
    */
   // The constructor is shutdown so only RpcServer in this class can make one of these.
   CallRunner(final RpcServerInterface rpcServer, final RpcCall call) {
@@ -65,8 +73,11 @@ public class CallRunner {
     this.rpcServer = rpcServer;
     this.span = Span.current();
     // Add size of the call to queue size.
-    if (call != null && rpcServer != null) {
-      this.rpcServer.addCallSize(call.getSize());
+    if (rpcServer != null) {
+      if (call != null) {
+        this.rpcServer.addCallSize(call.getSize());
+      }
+      this.rpcServer.getScheduler().getPointerScope().attach(this);
     }
   }
 
@@ -84,7 +95,13 @@ public class CallRunner {
   private void cleanup() {
     this.call.cleanup();
     this.call = null;
+    this.rpcServer.getScheduler().getPointerScope().detach(this);
     this.rpcServer = null;
+  }
+
+  @Override
+  public void run(final TaskRunnableContainer container, final Pointer ctx) {
+    run();
   }
 
   public void run() {

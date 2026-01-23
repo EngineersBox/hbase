@@ -350,7 +350,7 @@ public class ExecutorService {
             Executor.this.name + "_" + DATA_BROKER_NAME,
             publisher
           );
-          return OptionalUtils.none();
+          return OptionalUtils.noneGenericError();
         }
       });
       final DataBrokerProperties properties = scope.attachTransparent(new DataBrokerProperties(scope))
@@ -370,27 +370,21 @@ public class ExecutorService {
     }
 
     private void initScheduler(final String schedulerLibName) {
-      final DylibSpecifier schedulerDylib = this.scope.attachTransparent(new DylibSpecifier());
-      schedulerDylib.instanceName(this.sliceName);
-      schedulerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
-      schedulerDylib.name(SliceUtils.fromString(schedulerLibName, this.scope));
-      final Kairos.KairosResult result = Kairos.runSchedulerDylib(
-        Scheduling.KAIROS,
-        schedulerDylib,
-        this.scope.attachTransparent(new TrackingThreadPoolProvider(
-          this.scope,
-          this.threadPoolExecutor
-        ).intoBox()),
-        this.scope.attachTransparent(new SLF4JLoggerDrain(
-          this.toString(),
-          this.scope
-        ).intoBox())
-      ).intern();
-      if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
-        LOG.error("Failed to run scheduler: {}", result.name());
-        throw new IllegalStateException("Failed to run scheduler: " + result.name());
+      try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+        final DylibSpecifier schedulerDylib = tempScope.attachTransparent(new DylibSpecifier());
+        schedulerDylib.instanceName(this.sliceName);
+        schedulerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
+        schedulerDylib.name(SliceUtils.fromString(schedulerLibName, tempScope));
+        final Kairos.KairosResult result =
+          Kairos.runSchedulerDylib(Scheduling.KAIROS, schedulerDylib, this.scope.attachTransparent(
+              new TrackingThreadPoolProvider(this.scope, this.threadPoolExecutor).intoBox()),
+            this.scope.attachTransparent(new SLF4JLoggerDrain(this.toString()).intoBox())).intern();
+        if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
+          LOG.error("Failed to run scheduler: {}", result.name());
+          throw new IllegalStateException("Failed to run scheduler: " + result.name());
+        }
+        LOG.info("Started scheduler {} with library {}", this.name, schedulerLibName);
       }
-      LOG.info("Started scheduler {} with library {}", this.name, schedulerLibName);
     }
 
     /**
@@ -530,7 +524,7 @@ public class ExecutorService {
           final TaskRunnableBox taskRunnableBox,
           final Pointer pointer) {
           executor.submit(TaskUtils.intoRunnable(taskRunnableBox, pointer));
-          return OptionalUtils.none();
+          return OptionalUtils.noneGenericError();
         }
       });
       group.saturateBox(workerGroupBox);
