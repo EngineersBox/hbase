@@ -7,28 +7,33 @@ import com.engineersbox.kairos.WorkerGroup;
 import com.engineersbox.kairos.WorkerGroupContainer;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
 import com.engineersbox.kairos.utils.OptionalUtils;
-import com.engineersbox.kairos.utils.TaskUtils;
 import com.google.common.base.Preconditions;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.conf.ConfigurationObserver;
 import org.apache.hadoop.hbase.util.BoundedPriorityBlockingQueue;
+import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.ReflectionUtils;
 import org.apache.hbase.thirdparty.com.google.common.base.Strings;
+import org.apache.hbase.thirdparty.com.google.protobuf.Descriptors;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.bytedeco.javacpp.Pointer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @InterfaceAudience.Private
 public class RpcHandlerPool extends WorkerGroup {
@@ -76,8 +81,8 @@ public class RpcHandlerPool extends WorkerGroup {
   public static final String PLUGGABLE_CALL_QUEUE_WITH_FAST_PATH_ENABLED =
     "hbase.ipc.server.callqueue.pluggable.queue.fast.path.enabled";
 
-  private final LongAdder numGeneralCallsDropped = new LongAdder();
-  private final LongAdder numLifoModeSwitches = new LongAdder();
+  protected final LongAdder numGeneralCallsDropped = new LongAdder();
+  protected final LongAdder numLifoModeSwitches = new LongAdder();
 
   protected final int numCallQueues;
   protected final List<BlockingQueue<CallRunner>> queues;
@@ -86,7 +91,7 @@ public class RpcHandlerPool extends WorkerGroup {
 
   protected volatile int currentQueueLimit;
 
-  private final AtomicInteger activeHandlerCount = new AtomicInteger(0);
+  protected final AtomicInteger activeHandlerCount = new AtomicInteger(0);
   private final List<RpcHandler> handlers;
   private final int handlerCount;
   private final AtomicInteger failedHandlerCount = new AtomicInteger(0);
@@ -98,7 +103,7 @@ public class RpcHandlerPool extends WorkerGroup {
   private final Configuration conf;
   private final Abortable abortable;
 
-  private final TransparentPointerScope scope;
+  private final TransparentPointerScope ptrScope;
 
   public RpcHandlerPool(final String name, final int handlerCount, final int maxQueueLength,
     final PriorityFunction priority, final Configuration conf, final Abortable abortable) {
@@ -112,7 +117,7 @@ public class RpcHandlerPool extends WorkerGroup {
     this.name = name;
     this.conf = conf;
     this.abortable = abortable;
-    this.scope = new TransparentPointerScope();
+    this.ptrScope = new TransparentPointerScope();
     float callQueuesHandlersFactor = this.conf.getFloat(CALL_QUEUE_HANDLER_FACTOR_CONF_KEY, 0.1f);
     if (
       Float.compare(callQueuesHandlersFactor, 1.0f) > 0
@@ -169,6 +174,10 @@ public class RpcHandlerPool extends WorkerGroup {
     }
     initializeQueues(this.numCallQueues);
     this.balancer = getBalancer(name, conf, this.queues);
+    LOG.info(
+      "Instantiated {} with queueClass={}; "
+        + "numCallQueues={}, maxQueueLength={}, handlerCount={}",
+      this.name, this.queueClass, this.numCallQueues, maxQueueLength, this.handlerCount);
   }
 
   protected void initializeQueues(final int numQueues) {
@@ -188,12 +197,12 @@ public class RpcHandlerPool extends WorkerGroup {
 
   @Override
   public OptionalGenericError assign(final WorkerGroupContainer container,
-    final TaskRunnableBox taskRunnable, final Pointer ctx) {
+    final TaskRunnableBox taskRunnable, final Pointer ctx, final long operationID) {
     final CallRunner callRunner = (CallRunner) taskRunnable.container().instance().instance();
     final int queueIndex = this.balancer.getNextQueue(callRunner);
     final Queue<CallRunner> queue = this.queues.get(queueIndex);
     if (queue.size() >= this.currentQueueLimit || !queue.offer(callRunner)) {
-      return OptionalUtils.some(Kairos.GenericError.GENERIC_ERROR_FAILED, this.scope);
+      return OptionalUtils.some(Kairos.GenericError.GENERIC_ERROR_FAILED, this.ptrScope);
     }
     return OptionalUtils.noneGenericError();
   }
@@ -201,7 +210,8 @@ public class RpcHandlerPool extends WorkerGroup {
   @Override
   public OptionalGenericError resize(final WorkerGroupContainer workerGroupContainer,
     final long newSize) {
-
+    this.currentQueueLimit = (int) newSize;
+    return OptionalUtils.noneGenericError();
   }
 
   @Override
@@ -258,10 +268,37 @@ public class RpcHandlerPool extends WorkerGroup {
   }
 
   public void stop() {
-    for (RpcHandler handler : handlers) {
+    for (final RpcHandler handler : handlers) {
       handler.stopRunning();
       handler.interrupt();
     }
+  }
+
+  public Map<String, Long> getCallQueueCountsSummary() {
+    return queues.stream().flatMap(Collection::stream).map(RpcHandlerPool::getMethodName)
+      .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()));
+  }
+
+  public Map<String, Long> getCallQueueSizeSummary() {
+    return queues.stream().flatMap(Collection::stream)
+      .map(callRunner -> new Pair<>(getMethodName(callRunner), getRpcCallSize(callRunner)))
+      .collect(Collectors.groupingBy(Pair::getFirst, Collectors.summingLong(Pair::getSecond)));
+  }
+
+  /**
+   * Return the {@link Descriptors.MethodDescriptor#getName()} from {@code callRunner} or "Unknown".
+   */
+  private static String getMethodName(final CallRunner callRunner) {
+    return Optional.ofNullable(callRunner).map(CallRunner::getRpcCall).map(RpcCall::getMethod)
+      .map(Descriptors.MethodDescriptor::getName).orElse("Unknown");
+  }
+
+  /**
+   * Return the {@link RpcCall#getSize()} from {@code callRunner} or 0L.
+   */
+  private static long getRpcCallSize(final CallRunner callRunner) {
+    return Optional.ofNullable(callRunner).map(CallRunner::getRpcCall).map(RpcCall::getSize)
+      .orElse(0L);
   }
 
   protected int computeNumCallQueues(final int handlerCount, final float callQueuesHandlersFactor) {
@@ -350,6 +387,15 @@ public class RpcHandlerPool extends WorkerGroup {
       LOG.error("Could not find " + queueClassName + " on the classpath to load.");
       return Optional.empty();
     }
+  }
+
+  /** Returns the length of the pending queue */
+  public int getQueueLength() {
+    int length = 0;
+    for (final BlockingQueue<CallRunner> queue : this.queues) {
+      length += queue.size();
+    }
+    return length;
   }
 
   private void propagateBalancerConfigChange(final QueueBalancer balancer, final Configuration updatedConf) {

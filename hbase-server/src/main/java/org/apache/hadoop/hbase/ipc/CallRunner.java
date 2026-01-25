@@ -58,6 +58,7 @@ public class CallRunner extends TaskRunnable {
   private MonitoredRPCHandler status;
   private final Span span;
   private volatile boolean successful;
+  private volatile long operationID;
 
   /**
    * On construction, adds the size of this call to the running count of outstanding call sizes.
@@ -79,6 +80,7 @@ public class CallRunner extends TaskRunnable {
       }
       this.rpcServer.getScheduler().getPointerScope().attach(this);
     }
+    this.operationID = 0;
   }
 
   public RpcCall getRpcCall() {
@@ -100,12 +102,15 @@ public class CallRunner extends TaskRunnable {
   }
 
   @Override
-  public void run(final TaskRunnableContainer container, final Pointer ctx) {
+  public void run(final TaskRunnableContainer container, final Pointer ctx,
+    final long operationID) {
+    this.operationID = operationID;
     run();
   }
 
   public void run() {
     try (Scope ignored = span.makeCurrent()) {
+      this.span.setAttribute("kairos_operation_id", this.operationID);
       if (call.disconnectSince() >= 0) {
         RpcServer.LOG.debug("{}: skipped {}", Thread.currentThread().getName(), call);
         span.addEvent("Client disconnect detected");
