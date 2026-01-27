@@ -4,7 +4,10 @@ import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.OptionalGenericError;
 import com.engineersbox.kairos.TaskRunnableBox;
 import com.engineersbox.kairos.WorkerGroup;
+import com.engineersbox.kairos.WorkerGroupBox;
 import com.engineersbox.kairos.WorkerGroupContainer;
+import com.engineersbox.kairos.WorkerGroupProvider;
+import com.engineersbox.kairos.WorkerGroupProviderContainer;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
 import com.engineersbox.kairos.utils.OptionalUtils;
 import com.google.common.base.Preconditions;
@@ -25,11 +28,13 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
@@ -38,7 +43,7 @@ import java.util.stream.Collectors;
 @InterfaceAudience.Private
 public class RpcHandlerPool extends WorkerGroup {
 
-  private static final Logger LOG = LoggerFactory.getLogger(RpcHandlerPool.class);
+  private static final Logger LOGGER = LoggerFactory.getLogger(RpcHandlerPool.class);
 
   protected static final int DEFAULT_CALL_QUEUE_SIZE_HARD_LIMIT = 250;
   public static final String CALL_QUEUE_HANDLER_FACTOR_CONF_KEY =
@@ -84,63 +89,73 @@ public class RpcHandlerPool extends WorkerGroup {
   protected final LongAdder numGeneralCallsDropped = new LongAdder();
   protected final LongAdder numLifoModeSwitches = new LongAdder();
 
-  protected final int numCallQueues;
-  protected final List<BlockingQueue<CallRunner>> queues;
-  private final Class<? extends BlockingQueue> queueClass;
-  private final Object[] queueInitArgs;
+  protected int numCallQueues;
+  protected List<BlockingQueue<CallRunner>> queues;
+  private Class<? extends BlockingQueue> queueClass;
+  private Object[] queueInitArgs;
 
   protected volatile int currentQueueLimit;
 
   protected final AtomicInteger activeHandlerCount = new AtomicInteger(0);
-  private final List<RpcHandler> handlers;
-  private final int handlerCount;
+  private List<RpcHandler> handlers;
+  private int handlerCount;
   private final AtomicInteger failedHandlerCount = new AtomicInteger(0);
 
-  private final QueueBalancer balancer;
+  protected QueueBalancer balancer;
+  private final AtomicBoolean flushing = new AtomicBoolean(false);
 
   private String name;
-
+  private final int rawHandlerCount;
+  private final String callQueueType;
+  private final int maxQueueLength;
+  private final int port;
+  private final PriorityFunction priority;
   private final Configuration conf;
   private final Abortable abortable;
 
   private final TransparentPointerScope ptrScope;
 
   public RpcHandlerPool(final String name, final int handlerCount, final int maxQueueLength,
-    final PriorityFunction priority, final Configuration conf, final Abortable abortable) {
+    final int port, final PriorityFunction priority, final Configuration conf, final Abortable abortable) {
     this(name, handlerCount, conf.get(CALL_QUEUE_TYPE_CONF_KEY, CALL_QUEUE_TYPE_CONF_DEFAULT),
-      maxQueueLength, priority, conf, abortable);
+      maxQueueLength, port, priority, conf, abortable);
   }
 
   public RpcHandlerPool(final String name, final int handlerCount, final String callQueueType,
-    final int maxQueueLength, final PriorityFunction priority, final Configuration conf,
+    final int maxQueueLength, final int port, final PriorityFunction priority, final Configuration conf,
     final Abortable abortable) {
     this.name = name;
     this.conf = conf;
     this.abortable = abortable;
+    this.port = port;
+    this.rawHandlerCount = handlerCount;
+    this.callQueueType = callQueueType;
+    this.maxQueueLength = maxQueueLength;
+    this.priority = priority;
     this.ptrScope = new TransparentPointerScope();
-    float callQueuesHandlersFactor = this.conf.getFloat(CALL_QUEUE_HANDLER_FACTOR_CONF_KEY, 0.1f);
-    if (
-      Float.compare(callQueuesHandlersFactor, 1.0f) > 0
-        || Float.compare(0.0f, callQueuesHandlersFactor) > 0
-    ) {
-      LOG.warn(
-        CALL_QUEUE_HANDLER_FACTOR_CONF_KEY + " is *ILLEGAL*, it should be in range [0.0, 1.0]");
-      // For callQueuesHandlersFactor > 1.0, we just set it 1.0f.
-      if (Float.compare(callQueuesHandlersFactor, 1.0f) > 0) {
-        LOG.warn("Set " + CALL_QUEUE_HANDLER_FACTOR_CONF_KEY + " 1.0f");
-        callQueuesHandlersFactor = 1.0f;
-      } else {
-        // But for callQueuesHandlersFactor < 0.0, following method #computeNumCallQueues
-        // will compute max(1, -x) => 1 which has same effect of default value.
-        LOG.warn("Set " + CALL_QUEUE_HANDLER_FACTOR_CONF_KEY + " default value 0.0f");
-      }
+  }
+
+  protected void initializeQueues(final int numQueues) {
+    if (queueInitArgs.length > 0) {
+      currentQueueLimit = (int) queueInitArgs[0];
+      queueInitArgs[0] = Math.max((int) queueInitArgs[0], DEFAULT_CALL_QUEUE_SIZE_HARD_LIMIT);
     }
-    this.numCallQueues = computeNumCallQueues(handlerCount, callQueuesHandlersFactor);
+    for (int i = 0; i < numQueues; ++i) {
+      queues.add(ReflectionUtils.newInstance(queueClass, queueInitArgs));
+    }
+  }
+
+  @Override
+  public int capabilities(final WorkerGroupContainer workerGroupContainer) {
+    return Kairos.WG_CAP_ASSIGN | Kairos.WG_CAP_RESIZE;
+  }
+
+  @Override
+  public OptionalGenericError start(final WorkerGroupContainer workerGroupContainer) {
+    this.numCallQueues = rawHandlerCount;
     this.queues = new ArrayList<>(this.numCallQueues);
-
-    this.handlerCount = Math.max(handlerCount, this.numCallQueues);
+    this.handlerCount = rawHandlerCount;
     this.handlers = new ArrayList<>(this.handlerCount);
-
     if (isDeadlineQueueType(callQueueType)) {
       this.name += ".Deadline";
       this.queueInitArgs =
@@ -174,30 +189,43 @@ public class RpcHandlerPool extends WorkerGroup {
     }
     initializeQueues(this.numCallQueues);
     this.balancer = getBalancer(name, conf, this.queues);
-    LOG.info(
+    LOGGER.info(
       "Instantiated {} with queueClass={}; "
         + "numCallQueues={}, maxQueueLength={}, handlerCount={}",
       this.name, this.queueClass, this.numCallQueues, maxQueueLength, this.handlerCount);
-  }
-
-  protected void initializeQueues(final int numQueues) {
-    if (queueInitArgs.length > 0) {
-      currentQueueLimit = (int) queueInitArgs[0];
-      queueInitArgs[0] = Math.max((int) queueInitArgs[0], DEFAULT_CALL_QUEUE_SIZE_HARD_LIMIT);
-    }
-    for (int i = 0; i < numQueues; ++i) {
-      queues.add(ReflectionUtils.newInstance(queueClass, queueInitArgs));
-    }
+    startHandlers(port);
+    return OptionalUtils.noneGenericError();
   }
 
   @Override
-  public int capabilities(final WorkerGroupContainer workerGroupContainer) {
-    return Kairos.WG_CAP_ASSIGN | Kairos.WG_CAP_RESIZE;
+  public OptionalGenericError stop(final WorkerGroupContainer workerGroupContainer) {
+    return OptionalUtils.noneGenericError();
+  }
+
+  @Override
+  public void flush(final WorkerGroupContainer workerGroupContainer) {
+    this.flushing.set(true);
+    for (final BlockingQueue<CallRunner> queue : this.queues) {
+        while (!queue.isEmpty()) {
+          try {
+            queue.wait(10);
+          } catch (final InterruptedException ignored) {
+            // Ignored
+          }
+        }
+    }
   }
 
   @Override
   public OptionalGenericError assign(final WorkerGroupContainer container,
     final TaskRunnableBox taskRunnable, final Pointer ctx, final long operationID) {
+    if (this.flushing.get()) {
+      LOGGER.warn("Queue is flushing, dropping task for operation {}", operationID);
+      return OptionalUtils.some(
+        Kairos.GenericError.GENERIC_ERROR_FAILED,
+        this.ptrScope
+      );
+    }
     final CallRunner callRunner = (CallRunner) taskRunnable.container().instance().instance();
     final int queueIndex = this.balancer.getNextQueue(callRunner);
     final Queue<CallRunner> queue = this.queues.get(queueIndex);
@@ -207,16 +235,24 @@ public class RpcHandlerPool extends WorkerGroup {
     return OptionalUtils.noneGenericError();
   }
 
+  private void resize(final int newSize) {
+    this.currentQueueLimit = newSize;
+  }
+
   @Override
   public OptionalGenericError resize(final WorkerGroupContainer workerGroupContainer,
     final long newSize) {
-    this.currentQueueLimit = (int) newSize;
+    resize((int) newSize);
     return OptionalUtils.noneGenericError();
   }
 
   @Override
   public long size(final WorkerGroupContainer workerGroupContainer) {
     return this.handlerCount;
+  }
+
+  @Override public Pointer getProperty(WorkerGroupContainer workerGroupContainer, long l) {
+    return super.getProperty(workerGroupContainer, l);
   }
 
   public void start(final int port) {
@@ -228,8 +264,12 @@ public class RpcHandlerPool extends WorkerGroup {
   }
 
   protected void startHandlers(final int port) {
+    startHandlers(null, port);
+  }
+
+  protected void startHandlers(final String nameSuffix, final int port) {
     List<BlockingQueue<CallRunner>> callQueues = getQueues();
-    startHandlers(null, handlerCount, callQueues, 0, callQueues.size(), port, activeHandlerCount);
+    startHandlers(nameSuffix, handlerCount, callQueues, 0, callQueues.size(), port, activeHandlerCount);
   }
 
   /**
@@ -263,7 +303,7 @@ public class RpcHandlerPool extends WorkerGroup {
       handler.start();
       handlers.add(handler);
     }
-    LOG.debug("Started handlerCount={} with threadPrefix={}, numCallQueues={}, port={}",
+    LOGGER.debug("Started handlerCount={} with threadPrefix={}, numCallQueues={}, port={}",
       handlers.size(), threadPrefix, qsize, port);
   }
 
@@ -368,7 +408,7 @@ public class RpcHandlerPool extends WorkerGroup {
     String queueClassName = conf.get(PLUGGABLE_CALL_QUEUE_CLASS_NAME);
 
     if (queueClassName == null) {
-      LOG.error(
+      LOGGER.error(
         "Pluggable queue class config at " + PLUGGABLE_CALL_QUEUE_CLASS_NAME + " was not found");
       return Optional.empty();
     }
@@ -379,12 +419,12 @@ public class RpcHandlerPool extends WorkerGroup {
       if (BlockingQueue.class.isAssignableFrom(clazz)) {
         return Optional.of((Class<? extends BlockingQueue<CallRunner>>) clazz);
       } else {
-        LOG.error(
+        LOGGER.error(
           "Pluggable Queue class " + queueClassName + " does not extend BlockingQueue<CallRunner>");
         return Optional.empty();
       }
     } catch (ClassNotFoundException exception) {
-      LOG.error("Could not find " + queueClassName + " on the classpath to load.");
+      LOGGER.error("Could not find " + queueClassName + " on the classpath to load.");
       return Optional.empty();
     }
   }
@@ -404,7 +444,27 @@ public class RpcHandlerPool extends WorkerGroup {
     }
   }
 
+  /**
+   * Update current soft limit for executor's call queues
+   * @param conf updated configuration
+   */
+  public void resizeQueues(final Configuration conf) {
+    String configKey = RpcScheduler.IPC_SERVER_MAX_CALLQUEUE_LENGTH;
+    if (name != null) {
+      if (name.toLowerCase(Locale.ROOT).contains("priority")) {
+        configKey = RpcScheduler.IPC_SERVER_PRIORITY_MAX_CALLQUEUE_LENGTH;
+      } else if (name.toLowerCase(Locale.ROOT).contains("replication")) {
+        configKey = RpcScheduler.IPC_SERVER_REPLICATION_MAX_CALLQUEUE_LENGTH;
+      } else if (name.toLowerCase(Locale.ROOT).contains("bulkload")) {
+        configKey = RpcScheduler.IPC_SERVER_BULKLOAD_MAX_CALLQUEUE_LENGTH;
+      }
+    }
+    final int queueLimit = this.currentQueueLimit;
+    resize(conf.getInt(configKey, queueLimit));
+  }
+
   public void onConfigurationChange(final Configuration updatedConf) {
+    resizeQueues(updatedConf);
     propagateBalancerConfigChange(this.balancer, updatedConf);
     // update CoDel Scheduler tunables
     final int codelTargetDelay =
@@ -420,6 +480,42 @@ public class RpcHandlerPool extends WorkerGroup {
       } else if (queue instanceof ConfigurationObserver) {
         ((ConfigurationObserver) queue).onConfigurationChange(conf);
       }
+    }
+  }
+
+  public static class Provider extends WorkerGroupProvider {
+
+    private final String name;
+    private final int port;
+    private final PriorityFunction priority;
+    private final Configuration conf;
+    private final Abortable abortable;
+    private final TransparentPointerScope ptrScope;
+
+    public Provider(final String name, final int port, final PriorityFunction priority,
+      final Configuration conf, final Abortable abortable, final TransparentPointerScope ptrScope) {
+      this.name = name;
+      this.port = port;
+      this.priority = priority;
+      this.conf = conf;
+      this.abortable = abortable;
+      this.ptrScope = ptrScope;
+    }
+
+    @Override
+    public Kairos.GenericError provide(final WorkerGroupProviderContainer workerGroupProviderContainer,
+      final long size, final WorkerGroupBox workerGroupBox) {
+      final RpcHandlerPool pool = ptrScope.attachTransparent(new RpcHandlerPool(
+        this.name,
+        (int) size,
+        (int) size,
+        this.port,
+        this.priority,
+        this.conf,
+        this.abortable
+      ));
+      pool.saturateBox(workerGroupBox);
+      return Kairos.GenericError.GENERIC_ERROR_SUCCESS;
     }
   }
 

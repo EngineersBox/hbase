@@ -17,17 +17,30 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import com.engineersbox.kairos.ArcVoid;
+import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.LoggerDrainBox;
+import com.engineersbox.kairos.OptionalGenericError;
 import com.engineersbox.kairos.SchedulerArgs;
 import com.engineersbox.kairos.SchedulerPluginArcBox;
+import com.engineersbox.kairos.SchedulerPluginContainer;
 import com.engineersbox.kairos.SchedulerPluginCreator;
 import com.engineersbox.kairos.SliceU8;
-import com.engineersbox.kairos.Version;
+import com.engineersbox.kairos.Task;
+import com.engineersbox.kairos.WorkerGroupBox;
+import com.engineersbox.kairos.WorkerGroupProviderBox;
+import com.engineersbox.kairos.WorkerGroupProviderVTable;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
 import com.engineersbox.kairos.utils.SliceUtils;
+import com.engineersbox.kairos.utils.TaskUtils;
 import com.google.common.base.Strings;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
@@ -35,7 +48,6 @@ import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.conf.ConfigurationObserver;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
-import org.bytedeco.javacpp.Pointer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -56,77 +68,141 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProto
 @InterfaceAudience.LimitedPrivate({ HBaseInterfaceAudience.COPROC, HBaseInterfaceAudience.PHOENIX })
 @InterfaceStability.Evolving
 public class RWQueueRpcExecutor extends RpcExecutor {
-  private static final Logger LOG = LoggerFactory.getLogger(RWQueueRpcExecutor.class);
+  private static final Logger LOGGER = LoggerFactory.getLogger(RWQueueRpcExecutor.class);
 
   public static final String CALL_QUEUE_READ_SHARE_CONF_KEY =
     "hbase.ipc.server.callqueue.read.ratio";
   public static final String CALL_QUEUE_SCAN_SHARE_CONF_KEY =
     "hbase.ipc.server.callqueue.scan.ratio";
 
-  private final QueueBalancer writeBalancer;
-  private final QueueBalancer readBalancer;
-  private final QueueBalancer scanBalancer;
+  private WorkerGroupBox writeWorkerGroupBox;
+  private RpcHandlerPool writePool;
+  private WorkerGroupBox readWorkerGroupBox;
+  private RpcHandlerPool readPool;
+  private WorkerGroupBox scanWorkerGroupBox;
+  private RpcHandlerPool scanPool;
+
+  private int port;
+
   private final int writeHandlersCount;
   private final int readHandlersCount;
   private final int scanHandlersCount;
-  private final int numWriteQueues;
-  private final int numReadQueues;
   private final int numScanQueues;
 
   private final AtomicInteger activeWriteHandlerCount = new AtomicInteger(0);
   private final AtomicInteger activeReadHandlerCount = new AtomicInteger(0);
   private final AtomicInteger activeScanHandlerCount = new AtomicInteger(0);
 
-  public RWQueueRpcExecutor(final String name, final int handlerCount, final int maxQueueLength,
-    final PriorityFunction priority, final Configuration conf, final Abortable abortable,
-    final TransparentPointerScope scope, final SchedulerArgs schedulerArgs,
+  public RWQueueRpcExecutor(final String name, final int port, final int handlerCount,
+    final Configuration conf, final TransparentPointerScope scope, final SchedulerArgs schedulerArgs,
     final LoggerDrainBox loggerDrain, final ArcVoid pluginCtx) {
-    super(name, handlerCount, maxQueueLength, priority, conf, abortable,
-      scope, schedulerArgs, loggerDrain, pluginCtx);
+    super(name, scope, schedulerArgs, loggerDrain, pluginCtx);
+    this.port = port;
 
-    float callqReadShare = getReadShare(conf);
-    float callqScanShare = getScanShare(conf);
+    final float callqReadShare = getReadShare(conf);
+    final float callqScanShare = getScanShare(conf);
 
-    numWriteQueues = calcNumWriters(this.numCallQueues, callqReadShare);
-    writeHandlersCount = Math.max(numWriteQueues, calcNumWriters(handlerCount, callqReadShare));
+    final int numCallQueues = computeNumCallQueues(
+      handlerCount,
+      RpcExecutor.getCallQueuesHandlersFactor(conf)
+    );
 
-    int readQueues = calcNumReaders(this.numCallQueues, callqReadShare);
+    int numWriteQueues = calcNumWriters(numCallQueues, callqReadShare);
+    this.writeHandlersCount = Math.max(numWriteQueues, calcNumWriters(handlerCount, callqReadShare));
+
+    int readQueues = calcNumReaders(numCallQueues, callqReadShare);
     int readHandlers = Math.max(readQueues, calcNumReaders(handlerCount, callqReadShare));
 
     int scanHandlers = Math.max(0, (int) Math.floor(readHandlers * callqScanShare));
     int scanQueues =
       scanHandlers > 0 ? Math.max(1, (int) Math.floor(readQueues * callqScanShare)) : 0;
-
     if (scanQueues > 0) {
       // if scanQueues > 0, the handler count of read should > 0, then we make readQueues >= 1
       readQueues = Math.max(1, readQueues - scanQueues);
       readHandlers -= scanHandlers;
-    } else {
-      scanQueues = 0;
-      scanHandlers = 0;
     }
 
-    numReadQueues = readQueues;
-    readHandlersCount = readHandlers;
-    numScanQueues = scanQueues;
-    scanHandlersCount = scanHandlers;
+    final int numReadQueues = readQueues;
+    this.readHandlersCount = readHandlers;
+    this.numScanQueues = scanQueues;
+    this.scanHandlersCount = scanHandlers;
 
-    initializeQueues(numWriteQueues);
-    initializeQueues(numReadQueues);
-    initializeQueues(numScanQueues);
+    bindWorkers(null, schedulerArgs.worker_group_provider());
 
-    this.writeBalancer = getBalancer(name, conf, queues.subList(0, numWriteQueues));
-    this.readBalancer =
-      getBalancer(name, conf, queues.subList(numWriteQueues, numWriteQueues + numReadQueues));
-    this.scanBalancer = numScanQueues > 0
-      ? getBalancer(name, conf,
-        queues.subList(numWriteQueues + numReadQueues,
-          numWriteQueues + numReadQueues + numScanQueues))
-      : null;
+//    this.writeBalancer = getBalancer(name, conf, queues.subList(0, numWriteQueues));
+//    this.readBalancer =
+//      getBalancer(name, conf, queues.subList(numWriteQueues, numWriteQueues + numReadQueues));
+//    this.scanBalancer = numScanQueues > 0
+//      ? getBalancer(name, conf,
+//        queues.subList(numWriteQueues + numReadQueues,
+//          numWriteQueues + numReadQueues + numScanQueues))
+//      : null;
 
-    LOG.info(getName() + " writeQueues=" + numWriteQueues + " writeHandlers=" + writeHandlersCount
+    LOGGER.info(getName() + " writeQueues=" + numWriteQueues + " writeHandlers=" + writeHandlersCount
       + " readQueues=" + numReadQueues + " readHandlers=" + readHandlersCount + " scanQueues="
       + numScanQueues + " scanHandlers=" + scanHandlersCount);
+  }
+
+  @Override
+  public int bindWorkers(final SchedulerPluginContainer schedulerPluginContainer,
+    final WorkerGroupProviderBox workerGroupProviderBox) {
+    final WorkerGroupProviderVTable.Provide provide = workerGroupProviderBox.vtbl().provide();
+    final List<WorkerGroupBox> rollback = new ArrayList<>();
+    // Write
+    final WorkerGroupBox newWriteWorkerGroupBox = this.ptrScope.attachTransparent(new WorkerGroupBox());
+    rollback.add(newWriteWorkerGroupBox);
+    int result = provide.call(
+      workerGroupProviderBox.container(),
+      this.writeHandlersCount,
+      newWriteWorkerGroupBox
+    );
+    if (result != Kairos.GenericError.GENERIC_ERROR_SUCCESS.value) {
+      LOGGER.error("Unable to retrieve write worker group for RpcExecutor {}", this.name);
+      rollback.forEach(this.ptrScope::detach);
+      return result;
+    }
+    final RpcHandlerPool newWritePool = newWriteWorkerGroupBox.container().instance().instance().getPointer(RpcHandlerPool.class);
+    // Read
+    final WorkerGroupBox newReadWorkerGroupBox = this.ptrScope.attachTransparent(new WorkerGroupBox());
+    rollback.add(newReadWorkerGroupBox);
+    result = provide.call(
+      workerGroupProviderBox.container(),
+      this.readHandlersCount,
+      newReadWorkerGroupBox
+    );
+    if (result != Kairos.GenericError.GENERIC_ERROR_SUCCESS.value) {
+      LOGGER.error("Unable to retrieve read worker group for RpcExecutor {}", this.name);
+      rollback.forEach(this.ptrScope::detach);
+      return result;
+    }
+    final RpcHandlerPool newReadPool = newReadWorkerGroupBox.container().instance().instance().getPointer(RpcHandlerPool.class);
+    // Scan
+    final WorkerGroupBox newScanWorkerGroupBox = this.ptrScope.attachTransparent(new WorkerGroupBox());
+    rollback.add(newScanWorkerGroupBox);
+    result = provide.call(
+      workerGroupProviderBox.container(),
+      this.scanHandlersCount,
+      newScanWorkerGroupBox
+    );
+    if (result != Kairos.GenericError.GENERIC_ERROR_SUCCESS.value) {
+      LOGGER.error("Unable to retrieve scan worker group for RpcExecutor {}", this.name);
+      rollback.forEach(this.ptrScope::detach);
+      return result;
+    }
+    final RpcHandlerPool newScanPool = newScanWorkerGroupBox.container().instance().instance().getPointer(RpcHandlerPool.class);
+    // Write
+    this.ptrScope.detach(this.writeWorkerGroupBox);
+    this.writeWorkerGroupBox = newWriteWorkerGroupBox;
+    this.writePool = newWritePool;
+    // Read
+    this.ptrScope.detach(this.readWorkerGroupBox);
+    this.readWorkerGroupBox = newReadWorkerGroupBox;
+    this.readPool = newReadPool;
+    // Scan
+    this.ptrScope.detach(this.scanWorkerGroupBox);
+    this.scanWorkerGroupBox = newScanWorkerGroupBox;
+    this.scanPool = newScanPool;
+    return Kairos.GenericError.GENERIC_ERROR_SUCCESS.value;
   }
 
   @Override
@@ -136,143 +212,157 @@ public class RWQueueRpcExecutor extends RpcExecutor {
   }
 
   @Override
-  protected void startHandlers(final int port) {
-    startHandlers(".write", writeHandlersCount, queues, 0, numWriteQueues, port,
-      activeWriteHandlerCount);
-    startHandlers(".read", readHandlersCount, queues, numWriteQueues, numReadQueues, port,
-      activeReadHandlerCount);
-    if (numScanQueues > 0) {
-      startHandlers(".scan", scanHandlersCount, queues, numWriteQueues + numReadQueues,
-        numScanQueues, port, activeScanHandlerCount);
-    }
+  public void start(SchedulerPluginContainer schedulerPluginContainer) {
+    startHandlers();
   }
 
   @Override
-  public boolean dispatch(final CallRunner callTask) {
-    RpcCall call = callTask.getRpcCall();
-    return dispatchTo(isWriteRequest(call.getHeader(), call.getParam()),
-      shouldDispatchToScanQueue(callTask), callTask);
+  public void stop(SchedulerPluginContainer schedulerPluginContainer) {
+    stopHandlers();
   }
 
-  protected boolean dispatchTo(boolean toWriteQueue, boolean toScanQueue,
-    final CallRunner callTask) {
-    int queueIndex;
-    if (toWriteQueue) {
-      queueIndex = writeBalancer.getNextQueue(callTask);
-    } else if (toScanQueue) {
-      queueIndex = numWriteQueues + numReadQueues + scanBalancer.getNextQueue(callTask);
-    } else {
-      queueIndex = numWriteQueues + readBalancer.getNextQueue(callTask);
+  public void startHandlers() {
+    this.writePool.startHandlers(".write", this.port);
+    this.readPool.startHandlers(".read", this.port);
+    if (this.numScanQueues > 0) {
+      this.scanPool.startHandlers(".scan", this.port);
     }
+  }
 
-    Queue<CallRunner> queue = queues.get(queueIndex);
-    if (queue.size() >= currentQueueLimit) {
-      return false;
+  public void stopHandlers() {
+    this.writePool.stop();
+    this.readPool.stop();
+    this.scanPool.stop();
+  }
+
+  @Override
+  public boolean submit(final SchedulerPluginContainer schedulerPluginContainer, final Task task,
+    final long operation_id) {
+    final CallRunner callRunner = task.runnable().container().instance().instance().getPointer(CallRunner.class);
+    if (callRunner.isWriteRequest()) {
+      final OptionalGenericError result = this.writeWorkerGroupBox.vtbl().assign().call(
+        this.writeWorkerGroupBox.container(),
+        task.runnable(),
+        task.context(),
+        operation_id
+      );
+      if (result.tag().intern() == Kairos.OptionalGenericErrorTag.Some_GenericError) {
+        LOGGER.error("Failed to submit write task with operation ID {}", operation_id);
+        return false;
+      }
+    } else if (shouldDispatchToScanQueue(callRunner)) {
+      final OptionalGenericError result = this.scanWorkerGroupBox.vtbl().assign().call(
+        this.scanWorkerGroupBox.container(),
+        task.runnable(),
+        task.context(),
+        operation_id
+      );
+      if (result.tag().intern() == Kairos.OptionalGenericErrorTag.Some_GenericError) {
+        LOGGER.error("Failed to submit scan task with operation ID {}", operation_id);
+        return false;
+      }
+    } else {
+      final OptionalGenericError result = this.readWorkerGroupBox.vtbl().assign().call(
+        this.readWorkerGroupBox.container(),
+        task.runnable(),
+        task.context(),
+        operation_id
+      );
+      if (result.tag().intern() == Kairos.OptionalGenericErrorTag.Some_GenericError) {
+        LOGGER.error("Failed to submit read task with operation ID {}", operation_id);
+        return false;
+      }
     }
-    return queue.offer(callTask);
+    return true;
+  }
+
+  @Override
+  public int getQueueLength() {
+    return getWriteQueueLength()
+      + getReadQueueLength()
+      + getScanQueueLength();
   }
 
   @Override
   public int getWriteQueueLength() {
-    int length = 0;
-    for (int i = 0; i < numWriteQueues; i++) {
-      length += queues.get(i).size();
-    }
-    return length;
+    return this.writePool.getQueueLength();
   }
 
   @Override
   public int getReadQueueLength() {
-    int length = 0;
-    for (int i = numWriteQueues; i < (numWriteQueues + numReadQueues); i++) {
-      length += queues.get(i).size();
-    }
-    return length;
+    return this.readPool.getQueueLength();
   }
 
   @Override
   public int getScanQueueLength() {
-    int length = 0;
-    for (int i = numWriteQueues + numReadQueues; i
-        < (numWriteQueues + numReadQueues + numScanQueues); i++) {
-      length += queues.get(i).size();
-    }
-    return length;
+    return this.scanPool.getQueueLength();
+  }
+
+  @Override
+  public long getNumGeneralCallsDropped() {
+    return this.writePool.numGeneralCallsDropped.longValue()
+      + this.readPool.numGeneralCallsDropped.longValue()
+      + this.scanPool.numGeneralCallsDropped.longValue();
+  }
+
+  @Override public long getNumLifoModeSwitches() {
+    return this.writePool.numLifoModeSwitches.longValue()
+      + this.readPool.numLifoModeSwitches.longValue()
+      + this.scanPool.numLifoModeSwitches.longValue();
   }
 
   @Override
   public int getActiveHandlerCount() {
-    return activeWriteHandlerCount.get() + activeReadHandlerCount.get()
-      + activeScanHandlerCount.get();
+    return getActiveWriteHandlerCount()
+      + getActiveReadHandlerCount()
+      + getActiveScanHandlerCount();
   }
 
   @Override
   public int getActiveWriteHandlerCount() {
-    return activeWriteHandlerCount.get();
+    return this.writePool.activeHandlerCount.get();
   }
 
   @Override
   public int getActiveReadHandlerCount() {
-    return activeReadHandlerCount.get();
+    return this.readPool.activeHandlerCount.get();
   }
 
   @Override
   public int getActiveScanHandlerCount() {
-    return activeScanHandlerCount.get();
+    return this.scanPool.activeHandlerCount.get();
   }
 
-  protected boolean isWriteRequest(final RequestHeader header, final Message param) {
-    // TODO: Is there a better way to do this?
-    if (param instanceof MultiRequest) {
-      MultiRequest multi = (MultiRequest) param;
-      for (RegionAction regionAction : multi.getRegionActionList()) {
-        for (Action action : regionAction.getActionList()) {
-          if (action.hasMutation()) {
-            return true;
-          }
-        }
-      }
-    }
-    if (param instanceof MutateRequest) {
-      return true;
-    }
-    // Below here are methods for master. It's a pretty brittle version of this.
-    // Not sure that master actually needs a read/write queue since 90% of requests to
-    // master are writing to status or changing the meta table.
-    // All other read requests are admin generated and can be processed whenever.
-    // However changing that would require a pretty drastic change and should be done for
-    // the next major release and not as a fix for HBASE-14239
-    if (param instanceof RegionServerStatusProtos.ReportRegionStateTransitionRequest) {
-      return true;
-    }
-    if (param instanceof RegionServerStatusProtos.RegionServerStartupRequest) {
-      return true;
-    }
-    if (param instanceof RegionServerStatusProtos.RegionServerReportRequest) {
-      return true;
-    }
-    return false;
+  public Map<String, Long> getCallQueueCountsSummary() {
+    final Map<String, Long> summary = new HashMap<>();
+    summary.putAll(this.writePool.getCallQueueCountsSummary());
+    summary.putAll(this.readPool.getCallQueueCountsSummary());
+    summary.putAll(this.scanPool.getCallQueueCountsSummary());
+    return summary;
+  }
+
+  public Map<String, Long> getCallQueueSizeSummary() {
+    final Map<String, Long> summary = new HashMap<>();
+    summary.putAll(this.writePool.getCallQueueSizeSummary());
+    summary.putAll(this.readPool.getCallQueueSizeSummary());
+    summary.putAll(this.scanPool.getCallQueueSizeSummary());
+    return summary;
   }
 
   QueueBalancer getWriteBalancer() {
-    return writeBalancer;
+    return this.writePool.balancer;
   }
 
   QueueBalancer getReadBalancer() {
-    return readBalancer;
+    return this.readPool.balancer;
   }
 
   QueueBalancer getScanBalancer() {
-    return scanBalancer;
-  }
-
-  private boolean isScanRequest(final RequestHeader header, final Message param) {
-    return param instanceof ScanRequest;
+    return this.scanPool.balancer;
   }
 
   protected boolean shouldDispatchToScanQueue(final CallRunner task) {
-    RpcCall call = task.getRpcCall();
-    return numScanQueues > 0 && isScanRequest(call.getHeader(), call.getParam());
+    return numScanQueues > 0 && task.isScanRequest();
   }
 
   protected float getReadShare(final Configuration conf) {
@@ -300,11 +390,17 @@ public class RWQueueRpcExecutor extends RpcExecutor {
   }
 
   @Override
+  public void resizeQueues(Configuration conf) {
+    this.writePool.resizeQueues(conf);
+    this.readPool.resizeQueues(conf);
+    this.scanPool.resizeQueues(conf);
+  }
+
+  @Override
   public void onConfigurationChange(Configuration conf) {
-    super.onConfigurationChange(conf);
-    propagateBalancerConfigChange(writeBalancer, conf);
-    propagateBalancerConfigChange(readBalancer, conf);
-    propagateBalancerConfigChange(scanBalancer, conf);
+    this.writePool.onConfigurationChange(conf);
+    this.readPool.onConfigurationChange(conf);
+    this.scanPool.onConfigurationChange(conf);
   }
 
   private void propagateBalancerConfigChange(QueueBalancer balancer, Configuration conf) {
@@ -316,38 +412,30 @@ public class RWQueueRpcExecutor extends RpcExecutor {
   public static class Creator extends SchedulerPluginCreator {
 
     private final String name;
+    private final int port;
     private final int handlerCount;
-    private final int maxQueueLength;
-    private final PriorityFunction priority;
     private final Configuration conf;
-    private final Abortable abortable;
 
     private final TransparentPointerScope runtimeScope;
 
-    private Creator(final SliceU8 name,  final int handlerCount, final int maxQueueLength,
-      final PriorityFunction priority, final Configuration conf, final Abortable abortable,
-      final SliceU8 description, final TransparentPointerScope runtimeScope) {
+    private Creator(final SliceU8 name, final int port, final int handlerCount,
+      final Configuration conf, final SliceU8 description, final TransparentPointerScope runtimeScope) {
       super(name, description);
       this.name = SliceUtils.intoString(name);
+      this.port = port;
       this.handlerCount = handlerCount;
-      this.maxQueueLength = maxQueueLength;
-      this.priority = priority;
       this.conf = conf;
-      this.abortable = abortable;
       this.runtimeScope = runtimeScope;
     }
 
-    public static Creator newInstance(final String name,final int handlerCount, final int maxQueueLength,
-      final PriorityFunction priority, final Configuration conf, final Abortable abortable,
-      final TransparentPointerScope runtimeScope) {
+    public static Creator newInstance(final String name, final int port, final int handlerCount,
+      final Configuration conf, final TransparentPointerScope runtimeScope) {
       try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
         return new Creator(
           SliceUtils.fromString(Strings.nullToEmpty(name), tempScope),
+          port,
           handlerCount,
-          maxQueueLength,
-          priority,
           conf,
-          abortable,
           SliceUtils.fromString("", tempScope),
           runtimeScope
         );
@@ -359,11 +447,9 @@ public class RWQueueRpcExecutor extends RpcExecutor {
       final ArcVoid pluginCtx, final LoggerDrainBox loggerDrainBox, final SchedulerPluginArcBox schedulerPlugin) {
       final RWQueueRpcExecutor executor = this.runtimeScope.attachTransparent(new RWQueueRpcExecutor(
         this.name,
+        this.port,
         this.handlerCount,
-        this.maxQueueLength,
-        this.priority,
         this.conf,
-        this.abortable,
         new TransparentPointerScope(),
         schedulerArgs,
         loggerDrainBox,

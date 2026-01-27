@@ -18,6 +18,11 @@
 package org.apache.hadoop.hbase.ipc;
 
 import java.net.InetSocketAddress;
+import com.engineersbox.kairos.ArcVoid;
+import com.engineersbox.kairos.LoggerDrainBox;
+import com.engineersbox.kairos.SchedulerArgs;
+import com.engineersbox.kairos.SchedulerPlugin;
+import com.engineersbox.kairos.SliceU8;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
@@ -28,7 +33,7 @@ import org.bytedeco.javacpp.PointerScope;
  */
 @InterfaceAudience.LimitedPrivate({ HBaseInterfaceAudience.COPROC, HBaseInterfaceAudience.PHOENIX })
 @InterfaceStability.Evolving
-public abstract class RpcScheduler {
+public abstract class RpcScheduler extends SchedulerPlugin {
 
   public static final String IPC_SERVER_MAX_CALLQUEUE_LENGTH =
     "hbase.ipc.server.max.callqueue.length";
@@ -38,6 +43,11 @@ public abstract class RpcScheduler {
     "hbase.ipc.server.replication.max.callqueue.length";
   public static final String IPC_SERVER_BULKLOAD_MAX_CALLQUEUE_LENGTH =
     "hbase.ipc.server.bulkload.max.callqueue.length";
+
+  public RpcScheduler(SliceU8 instanceName, SchedulerArgs args, LoggerDrainBox loggerDrain,
+    ArcVoid pluginCtx) {
+    super(instanceName, args, loggerDrain, pluginCtx);
+  }
 
   /** Exposes runtime information of a {@code RpcServer} that a {@code RpcScheduler} may need. */
   public static abstract class Context {
@@ -52,19 +62,11 @@ public abstract class RpcScheduler {
   public abstract void init(Context context);
 
   /**
-   * Prepares for request serving. An implementation may start some handler threads here.
-   */
-  public abstract void start();
-
-  /** Stops serving new requests. */
-  public abstract void stop();
-
-  /**
    * Dispatches an RPC request asynchronously. An implementation is free to choose to process the
    * request immediately or delay it for later processing.
    * @param task the request to be dispatched
    */
-  public abstract boolean dispatch(CallRunner task);
+//  public abstract boolean dispatch(CallRunner task);
 
   /** Get call queue information **/
   public abstract CallQueueInfo getCallQueueInfo();

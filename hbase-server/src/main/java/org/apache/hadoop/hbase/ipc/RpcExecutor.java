@@ -18,6 +18,7 @@
 package org.apache.hadoop.hbase.ipc;
 
 import java.util.Locale;
+import java.util.Map;
 import com.engineersbox.kairos.ArcVoid;
 import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.LoggerDrainBox;
@@ -70,12 +71,11 @@ public abstract class RpcExecutor extends SchedulerPlugin {
     "hbase.ipc.server.callqueue.pluggable.queue.fast.path.enabled";
 
   protected volatile int currentQueueLimit;
-  protected WorkerGroupBox workerGroupBox;
-  protected RpcHandlerPool workerGroup;
+//  protected WorkerGroupBox workerGroupBox;
+//  protected RpcHandlerPool workerGroup;
 
-  private String name;
-
-  private final TransparentPointerScope ptrScope;
+  protected String name;
+  protected final TransparentPointerScope ptrScope;
 
   public RpcExecutor(final String name, final TransparentPointerScope ptrScope, final SchedulerArgs schedulerArgs,
     final LoggerDrainBox loggerDrain, final ArcVoid pluginCtx) {
@@ -88,59 +88,21 @@ public abstract class RpcExecutor extends SchedulerPlugin {
     }
   }
 
-  public void start(final int port) {
-    this.workerGroup.startHandlers(port);
-  }
-
-  public void stop() {
-    this.workerGroup.stop();
-  }
-
-  @Override
-  public boolean submit(final SchedulerPluginContainer schedulerPluginContainer, final Task task,
-    final long operation_id) {
-    return dispatch(task.runnable().container().instance().instance().getPointer(CallRunner.class),
-      operation_id);
-  }
-
   /** Add the request to the executor queue */
-  public abstract boolean dispatch(final CallRunner callTask, final long operation_id);
-
-  @Override
-  public int bindWorkers(final SchedulerPluginContainer schedulerPluginContainer,
-    final WorkerGroupProviderBox workerGroupProviderBox) {
-    this.workerGroupBox = this.ptrScope.attachTransparent(new WorkerGroupBox());
-    final int result = workerGroupProviderBox.vtbl().provide().call(
-      workerGroupProviderBox.container(),
-      0,
-      this.workerGroupBox
-    );
-    if (result != Kairos.GenericError.GENERIC_ERROR_SUCCESS.value) {
-      LOGGER.error("Unable to retrieve worker group for RpcExecutor {}", name);
-      return result;
-    }
-    this.workerGroup = this.workerGroupBox.container().instance().instance().getPointer(RpcHandlerPool.class);
-    return Kairos.GenericError.GENERIC_ERROR_SUCCESS.value;
-  }
+//  public abstract boolean dispatch(final CallRunner callTask, final long operation_id);
 
   @Override
   public OptionalGenericError deinit(final SchedulerPluginContainer schedulerPluginContainer) {
-    stop();
+    stop(schedulerPluginContainer);
     this.ptrScope.deallocate();
     return OptionalUtils.noneGenericError();
   }
 
-  public long getNumGeneralCallsDropped() {
-  return this.workerGroup.numGeneralCallsDropped.longValue();
-  }
+  public abstract long getNumGeneralCallsDropped();
 
-  public long getNumLifoModeSwitches() {
-    return this.workerGroup.numLifoModeSwitches.longValue();
-  }
+  public abstract long getNumLifoModeSwitches();
 
-  public int getActiveHandlerCount() {
-    return this.workerGroup.activeHandlerCount.get();
-  }
+  public abstract int getActiveHandlerCount();
 
   public int getActiveWriteHandlerCount() {
     return 0;
@@ -154,6 +116,7 @@ public abstract class RpcExecutor extends SchedulerPlugin {
     return 0;
   }
 
+  public abstract int getQueueLength();
 
   public int getReadQueueLength() {
     return 0;
@@ -167,36 +130,39 @@ public abstract class RpcExecutor extends SchedulerPlugin {
     return 0;
   }
 
+  public abstract Map<String, Long> getCallQueueCountsSummary();
+  public abstract Map<String, Long> getCallQueueSizeSummary();
+
   public String getName() {
     return this.name;
   }
 
-  /**
-   * Update current soft limit for executor's call queues
-   * @param conf updated configuration
-   */
-  public void resizeQueues(final Configuration conf) {
-    String configKey = RpcScheduler.IPC_SERVER_MAX_CALLQUEUE_LENGTH;
-    if (name != null) {
-      if (name.toLowerCase(Locale.ROOT).contains("priority")) {
-        configKey = RpcScheduler.IPC_SERVER_PRIORITY_MAX_CALLQUEUE_LENGTH;
-      } else if (name.toLowerCase(Locale.ROOT).contains("replication")) {
-        configKey = RpcScheduler.IPC_SERVER_REPLICATION_MAX_CALLQUEUE_LENGTH;
-      } else if (name.toLowerCase(Locale.ROOT).contains("bulkload")) {
-        configKey = RpcScheduler.IPC_SERVER_BULKLOAD_MAX_CALLQUEUE_LENGTH;
+  public abstract void resizeQueues(final Configuration conf);
+
+  public abstract void onConfigurationChange(final Configuration conf);
+
+  public static float getCallQueuesHandlersFactor(final Configuration conf) {
+    float callQueuesHandlersFactor = conf.getFloat(CALL_QUEUE_HANDLER_FACTOR_CONF_KEY, 0.1f);
+    if (
+      Float.compare(callQueuesHandlersFactor, 1.0f) > 0
+        || Float.compare(0.0f, callQueuesHandlersFactor) > 0
+    ) {
+      LOGGER.warn(
+        CALL_QUEUE_HANDLER_FACTOR_CONF_KEY + " is *ILLEGAL*, it should be in range [0.0, 1.0]");
+      // For callQueuesHandlersFactor > 1.0, we just set it 1.0f.
+      if (Float.compare(callQueuesHandlersFactor, 1.0f) > 0) {
+        LOGGER.warn("Set " + CALL_QUEUE_HANDLER_FACTOR_CONF_KEY + " 1.0f");
+        callQueuesHandlersFactor = 1.0f;
+      } else {
+        // But for callQueuesHandlersFactor < 0.0, following method #computeNumCallQueues
+        // will compute max(1, -x) => 1 which has same effect of default value.
+        LOGGER.warn("Set " + CALL_QUEUE_HANDLER_FACTOR_CONF_KEY + " default value 0.0f");
       }
     }
-    final int queueLimit = this.workerGroup.currentQueueLimit;
-    final OptionalGenericError result = this.workerGroup.resize(
-      this.workerGroupBox.container(),
-      conf.getInt(configKey, queueLimit)
-    );
-    if (result.tag().intern() == Kairos.OptionalGenericErrorTag.Some_GenericError) {
-      throw new IllegalStateException("Unable to resize worker queues: " + result.some().intern().name());
-    }
+    return callQueuesHandlersFactor;
   }
 
-  public void onConfigurationChange(final Configuration conf) {
-    this.workerGroup.onConfigurationChange(conf);
+  protected int computeNumCallQueues(final int handlerCount, final float callQueuesHandlersFactor) {
+    return Math.max(1, Math.round(handlerCount * callQueuesHandlersFactor));
   }
 }

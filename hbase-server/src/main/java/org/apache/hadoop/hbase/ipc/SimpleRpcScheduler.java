@@ -17,14 +17,26 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
+import com.engineersbox.kairos.Kairos;
+import com.engineersbox.kairos.SchedulerPluginContainer;
+import com.engineersbox.kairos.SliceU8;
+import com.engineersbox.kairos.Task;
+import com.engineersbox.kairos.TaskMetadataOrKairosResult;
+import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.SliceUtils;
+import com.engineersbox.kairos.utils.TaskUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.conf.ConfigurationObserver;
+import org.apache.hadoop.hbase.executor.Scheduling;
 import org.apache.hadoop.hbase.master.MasterAnnotationReadingPriorityFunction;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
+import org.bytedeco.javacpp.PointerScope;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The default scheduler. Configurable. Maintains isolated handler pools for general ('default'),
@@ -38,23 +50,32 @@ import org.apache.yetus.audience.InterfaceStability;
 @InterfaceAudience.LimitedPrivate({ HBaseInterfaceAudience.COPROC, HBaseInterfaceAudience.PHOENIX })
 @InterfaceStability.Evolving
 public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObserver {
+  private static final Logger LOGGER = LoggerFactory.getLogger(SimpleRpcScheduler.class);
+
   private int port;
   private final PriorityFunction priority;
   private final RpcExecutor callExecutor;
+  private final SliceU8 callExecutorName;
   private final RpcExecutor priorityExecutor;
+  private final SliceU8 priorityExecutorName;
   private final RpcExecutor replicationExecutor;
+  private final SliceU8 replicationExecutorName;
 
   /**
    * This executor is only for meta transition
    */
   private final RpcExecutor metaTransitionExecutor;
+  private final SliceU8 metaTransitionExecutorName;
 
   private final RpcExecutor bulkloadExecutor;
+  private final SliceU8 bulkloadExecutorName;
 
   /** What level a high priority call is at. */
   private final int highPriorityLevel;
 
   private Abortable abortable = null;
+
+  private final TransparentPointerScope ptrScope;
 
   /**
    * @param handlerCount            the number of handler threads that will be used to process calls
@@ -64,7 +85,8 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
    */
   public SimpleRpcScheduler(Configuration conf, int handlerCount, int priorityHandlerCount,
     int replicationHandlerCount, int metaTransitionHandler, PriorityFunction priority,
-    Abortable server, int highPriorityLevel) {
+    Abortable server, int highPriorityLevel, final TransparentPointerScope ptrScope) {
+    this.ptrScope = ptrScope;
     int bulkLoadHandlerCount = conf.getInt(HConstants.REGION_SERVER_BULKLOAD_HANDLER_COUNT,
       HConstants.DEFAULT_REGION_SERVER_BULKLOAD_HANDLER_COUNT);
     int maxQueueLength = conf.getInt(RpcScheduler.IPC_SERVER_MAX_CALLQUEUE_LENGTH,
@@ -91,8 +113,8 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
         maxQueueLength, priority, conf, server);
     } else {
       if (
-        RpcExecutor.isFifoQueueType(callQueueType) || RpcExecutor.isCodelQueueType(callQueueType)
-          || RpcExecutor.isPluggableQueueWithFastPath(callQueueType, conf)
+        RpcHandlerPool.isFifoQueueType(callQueueType) || RpcHandlerPool.isCodelQueueType(callQueueType)
+          || RpcHandlerPool.isPluggableQueueWithFastPath(callQueueType, conf)
       ) {
         callExecutor = new FastPathBalancedQueueRpcExecutor("default.FPBQ", handlerCount,
           maxQueueLength, priority, conf, server);
@@ -101,6 +123,7 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
           priority, conf, server);
       }
     }
+    this.callExecutorName = SliceUtils.fromString(this.callExecutor.getName(), this.ptrScope);
 
     float metaCallqReadShare =
       conf.getFloat(MetaRWQueueRpcExecutor.META_CALL_QUEUE_READ_SHARE_CONF_KEY,
@@ -109,36 +132,52 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
       // different read/write handler for meta, at least 1 read handler and 1 write handler
       this.priorityExecutor = new MetaRWQueueRpcExecutor("priority.RWQ",
         Math.max(2, priorityHandlerCount), maxPriorityQueueLength, priority, conf, server);
-    } else {
+      this.priorityExecutorName = SliceUtils.fromString(this.priorityExecutor.getName(), this.ptrScope);
+    } else if (priorityHandlerCount > 0) {
       // Create 2 queues to help priorityExecutor be more scalable.
-      this.priorityExecutor = priorityHandlerCount > 0
-        ? new FastPathBalancedQueueRpcExecutor("priority.FPBQ", priorityHandlerCount,
-          RpcExecutor.CALL_QUEUE_TYPE_FIFO_CONF_VALUE, maxPriorityQueueLength, priority, conf,
-          abortable)
-        : null;
-    }
-    this.replicationExecutor = replicationHandlerCount > 0
-      ? new FastPathBalancedQueueRpcExecutor("replication.FPBQ", replicationHandlerCount,
-        RpcExecutor.CALL_QUEUE_TYPE_FIFO_CONF_VALUE, maxReplicationQueueLength, priority, conf,
-        abortable)
-      : null;
-
-    this.metaTransitionExecutor = metaTransitionHandler > 0
-      ? new FastPathBalancedQueueRpcExecutor("metaPriority.FPBQ", metaTransitionHandler,
+      this.priorityExecutor =  new FastPathBalancedQueueRpcExecutor("priority.FPBQ", priorityHandlerCount,
         RpcExecutor.CALL_QUEUE_TYPE_FIFO_CONF_VALUE, maxPriorityQueueLength, priority, conf,
-        abortable)
-      : null;
-    this.bulkloadExecutor = bulkLoadHandlerCount > 0
-      ? new FastPathBalancedQueueRpcExecutor("bulkLoad.FPBQ", bulkLoadHandlerCount,
+        abortable);
+      this.priorityExecutorName = SliceUtils.fromString(this.priorityExecutor.getName(), this.ptrScope);
+    } else {
+      this.priorityExecutor = null;
+      this.priorityExecutorName = null;
+    }
+    if (replicationHandlerCount > 0) {
+      this.replicationExecutor = new FastPathBalancedQueueRpcExecutor("replication.FPBQ", replicationHandlerCount,
+        RpcExecutor.CALL_QUEUE_TYPE_FIFO_CONF_VALUE, maxReplicationQueueLength, priority, conf,
+        abortable);
+      this.replicationExecutorName = SliceUtils.fromString(this.replicationExecutor.getName(), this.ptrScope);
+    } else {
+      this.replicationExecutor = null;
+      this.replicationExecutorName = null;
+    }
+
+    if (metaTransitionHandler > 0) {
+      this.metaTransitionExecutor = new FastPathBalancedQueueRpcExecutor("metaPriority.FPBQ", metaTransitionHandler,
+        RpcExecutor.CALL_QUEUE_TYPE_FIFO_CONF_VALUE, maxPriorityQueueLength, priority, conf,
+        abortable);
+      this.metaTransitionExecutorName = SliceUtils.fromString(this.metaTransitionExecutor.getName(), this.ptrScope);
+    } else {
+      this.metaTransitionExecutor = null;
+      this.metaTransitionExecutorName = null;
+    }
+    if (bulkLoadHandlerCount > 0) {
+      this.bulkloadExecutor = new FastPathBalancedQueueRpcExecutor("bulkLoad.FPBQ", bulkLoadHandlerCount,
         RpcExecutor.CALL_QUEUE_TYPE_FIFO_CONF_VALUE, maxBulkLoadQueueLength, priority, conf,
-        abortable)
-      : null;
+        abortable);
+      this.bulkloadExecutorName = SliceUtils.fromString(this.bulkloadExecutor.getName(), this.ptrScope);
+    } else {
+      this.bulkloadExecutor = null;
+      this.bulkloadExecutorName = null;
+    }
   }
 
   public SimpleRpcScheduler(Configuration conf, int handlerCount, int priorityHandlerCount,
-    int replicationHandlerCount, PriorityFunction priority, int highPriorityLevel) {
+    int replicationHandlerCount, PriorityFunction priority, int highPriorityLevel,
+    final TransparentPointerScope ptrScope) {
     this(conf, handlerCount, priorityHandlerCount, replicationHandlerCount, 0, priority, null,
-      highPriorityLevel);
+      highPriorityLevel, ptrScope);
   }
 
   /**
@@ -164,7 +203,7 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
     String callQueueType =
       conf.get(RpcExecutor.CALL_QUEUE_TYPE_CONF_KEY, RpcExecutor.CALL_QUEUE_TYPE_CONF_DEFAULT);
     if (
-      RpcExecutor.isCodelQueueType(callQueueType) || RpcExecutor.isPluggableQueueType(callQueueType)
+      RpcHandlerPool.isCodelQueueType(callQueueType) || RpcHandlerPool.isPluggableQueueType(callQueueType)
     ) {
       callExecutor.onConfigurationChange(conf);
     }
@@ -176,63 +215,70 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
   }
 
   @Override
-  public void start() {
-    callExecutor.start(port);
+  public void start(final SchedulerPluginContainer schedulerPluginContainer) {
+    callExecutor.start();
     if (priorityExecutor != null) {
-      priorityExecutor.start(port);
+      priorityExecutor.start(schedulerPluginContainer);
     }
     if (replicationExecutor != null) {
-      replicationExecutor.start(port);
+      replicationExecutor.start(schedulerPluginContainer);
     }
     if (metaTransitionExecutor != null) {
-      metaTransitionExecutor.start(port);
+      metaTransitionExecutor.start(schedulerPluginContainer);
     }
     if (bulkloadExecutor != null) {
-      bulkloadExecutor.start(port);
+      bulkloadExecutor.start(schedulerPluginContainer);
     }
 
   }
 
   @Override
-  public void stop() {
-    callExecutor.stop();
+  public void stop(final SchedulerPluginContainer schedulerPluginContainer) {
+    callExecutor.stop(schedulerPluginContainer);
     if (priorityExecutor != null) {
-      priorityExecutor.stop();
+      priorityExecutor.stop(schedulerPluginContainer);
     }
     if (replicationExecutor != null) {
-      replicationExecutor.stop();
+      replicationExecutor.stop(schedulerPluginContainer);
     }
     if (metaTransitionExecutor != null) {
-      metaTransitionExecutor.stop();
+      metaTransitionExecutor.stop(schedulerPluginContainer);
     }
     if (bulkloadExecutor != null) {
-      bulkloadExecutor.stop();
+      bulkloadExecutor.stop(schedulerPluginContainer);
     }
-
   }
 
   @Override
-  public boolean dispatch(CallRunner callTask) {
-    RpcCall call = callTask.getRpcCall();
+  public boolean submit(final SchedulerPluginContainer schedulerPluginContainer, final Task task,
+    final long operation_id) {
+    final CallRunner callRunner = task.runnable().container().instance().instance().getPointer(CallRunner.class);
+    RpcCall call = callRunner.getRpcCall();
     int level =
       priority.getPriority(call.getHeader(), call.getParam(), call.getRequestUser().orElse(null));
     if (level == HConstants.PRIORITY_UNSET) {
       level = HConstants.NORMAL_QOS;
     }
+    TaskMetadataOrKairosResult result;
     if (
       metaTransitionExecutor != null
         && level == MasterAnnotationReadingPriorityFunction.META_TRANSITION_QOS
     ) {
-      return metaTransitionExecutor.dispatch(callTask);
+      result = Kairos.submit(Scheduling.KAIROS, this.metaTransitionExecutorName, task);
     } else if (priorityExecutor != null && level > highPriorityLevel) {
-      return priorityExecutor.dispatch(callTask);
+      result = Kairos.submit(Scheduling.KAIROS, this.priorityExecutorName, task);
     } else if (replicationExecutor != null && level == HConstants.REPLICATION_QOS) {
-      return replicationExecutor.dispatch(callTask);
+      result = Kairos.submit(Scheduling.KAIROS, this.replicationExecutorName, task);
     } else if (bulkloadExecutor != null && level == HConstants.BULKLOAD_QOS) {
-      return bulkloadExecutor.dispatch(callTask);
+      result = Kairos.submit(Scheduling.KAIROS, this.bulkloadExecutorName, task);
     } else {
-      return callExecutor.dispatch(callTask);
+      result = Kairos.submit(Scheduling.KAIROS, this.callExecutorName, task);
     }
+    if (result.tag().intern() == Kairos.TaskMetadataOrKairosResultTag.Err_TaskMetadata__KairosResult) {
+      LOGGER.error("Failed to dispatch task {}", operation_id);
+      return true;
+    }
+    return false;
   }
 
   @Override
@@ -330,6 +376,10 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
   @Override
   public int getActiveScanRpcHandlerCount() {
     return callExecutor.getActiveScanHandlerCount();
+  }
+
+  @Override public PointerScope getPointerScope() {
+    return null;
   }
 
   @Override

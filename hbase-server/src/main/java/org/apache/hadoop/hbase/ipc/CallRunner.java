@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
+import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.TaskRunnable;
 import com.engineersbox.kairos.TaskRunnableContainer;
 import io.opentelemetry.api.trace.Span;
@@ -31,6 +32,9 @@ import org.apache.hadoop.hbase.exceptions.TimeoutIOException;
 import org.apache.hadoop.hbase.monitoring.MonitoredRPCHandler;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.server.trace.IpcServerSpanBuilder;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos;
 import org.apache.hadoop.hbase.trace.TraceUtil;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.Pair;
@@ -258,4 +262,52 @@ public class CallRunner extends TaskRunnable {
       span.end();
     }
   }
+
+  public boolean isWriteRequest() {
+    final Message param = this.call.getParam();
+    // TODO: Is there a better way to do this?
+    if (param instanceof ClientProtos.MultiRequest) {
+      ClientProtos.MultiRequest multi = (ClientProtos.MultiRequest) param;
+      for (final ClientProtos.RegionAction regionAction : multi.getRegionActionList()) {
+        for (final ClientProtos.Action action : regionAction.getActionList()) {
+          if (action.hasMutation()) {
+            return true;
+          }
+        }
+      }
+    }
+    if (param instanceof ClientProtos.MutateRequest) {
+      return true;
+    }
+    // Below here are methods for master. It's a pretty brittle version of this.
+    // Not sure that master actually needs a read/write queue since 90% of requests to
+    // master are writing to status or changing the meta table.
+    // All other read requests are admin generated and can be processed whenever.
+    // However changing that would require a pretty drastic change and should be done for
+    // the next major release and not as a fix for HBASE-14239
+    if (param instanceof RegionServerStatusProtos.ReportRegionStateTransitionRequest) {
+      return true;
+    }
+    if (param instanceof RegionServerStatusProtos.RegionServerStartupRequest) {
+      return true;
+    }
+    if (param instanceof RegionServerStatusProtos.RegionServerReportRequest) {
+      return true;
+    }
+    return false;
+  }
+
+  public boolean isScanRequest() {
+    return this.call.getParam() instanceof ClientProtos.ScanRequest;
+  }
+
+  public Kairos.TaskKind getTaskKind() {
+    if (isWriteRequest()) {
+      return Kairos.TaskKind.Write;
+    } else if (isScanRequest()) {
+      return Kairos.TaskKind.Scan;
+    }
+    return Kairos.TaskKind.Read;
+  }
+
 }
