@@ -17,9 +17,14 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
+import com.engineersbox.kairos.OptionalGenericError;
+import com.engineersbox.kairos.SchedulerPluginContainer;
+import com.engineersbox.kairos.Task;
+import com.engineersbox.kairos.WorkerGroupProviderBox;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
+import org.bytedeco.javacpp.PointerScope;
 
 /**
  * Users of the hbase.region.server.rpc.scheduler.factory.class customization config can return an
@@ -32,17 +37,13 @@ public class DelegatingRpcScheduler extends RpcScheduler {
   protected RpcScheduler delegate;
 
   public DelegatingRpcScheduler(RpcScheduler delegate) {
+    super(
+      null,
+      null,
+      null,
+      null
+    );
     this.delegate = delegate;
-  }
-
-  @Override
-  public void stop() {
-    delegate.stop();
-  }
-
-  @Override
-  public void start() {
-    delegate.start();
   }
 
   @Override
@@ -96,8 +97,30 @@ public class DelegatingRpcScheduler extends RpcScheduler {
   }
 
   @Override
-  public boolean dispatch(CallRunner task) {
-    return delegate.dispatch(task);
+  public int bindWorkers(final SchedulerPluginContainer schedulerPluginContainer,
+    final WorkerGroupProviderBox workerGroupProviderBox) {
+    return this.delegate.bindWorkers(schedulerPluginContainer, workerGroupProviderBox);
+  }
+
+  @Override
+  public OptionalGenericError deinit(final SchedulerPluginContainer schedulerPluginContainer) {
+    return this.delegate.deinit(schedulerPluginContainer);
+  }
+
+  @Override
+  public boolean submit(final SchedulerPluginContainer schedulerPluginContainer, final Task task,
+    final long operation_id) {
+    return this.delegate.submit(schedulerPluginContainer, task, operation_id);
+  }
+
+  @Override
+  public void stop(final SchedulerPluginContainer schedulerPluginContainer) {
+    this.delegate.stop(schedulerPluginContainer);
+  }
+
+  @Override
+  public void start(final SchedulerPluginContainer schedulerPluginContainer) {
+    this.delegate.start(schedulerPluginContainer);
   }
 
   @Override
@@ -148,6 +171,11 @@ public class DelegatingRpcScheduler extends RpcScheduler {
   @Override
   public int getActiveScanRpcHandlerCount() {
     return 0;
+  }
+
+  @Override
+  public PointerScope getPointerScope() {
+    return this.delegate.getPointerScope();
   }
 
   @Override

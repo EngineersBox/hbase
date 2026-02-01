@@ -17,7 +17,6 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
-import java.util.Locale;
 import java.util.Map;
 import com.engineersbox.kairos.ArcVoid;
 import com.engineersbox.kairos.Kairos;
@@ -26,9 +25,6 @@ import com.engineersbox.kairos.OptionalGenericError;
 import com.engineersbox.kairos.SchedulerArgs;
 import com.engineersbox.kairos.SchedulerPlugin;
 import com.engineersbox.kairos.SchedulerPluginContainer;
-import com.engineersbox.kairos.Task;
-import com.engineersbox.kairos.WorkerGroupBox;
-import com.engineersbox.kairos.WorkerGroupProviderBox;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
 import com.engineersbox.kairos.utils.OptionalUtils;
 import com.engineersbox.kairos.utils.SliceUtils;
@@ -89,7 +85,7 @@ public abstract class RpcExecutor extends SchedulerPlugin {
   }
 
   /** Add the request to the executor queue */
-//  public abstract boolean dispatch(final CallRunner callTask, final long operation_id);
+//  public abstract boolean dispatch(final CallRunner callOperation, final long operation_id);
 
   @Override
   public OptionalGenericError deinit(final SchedulerPluginContainer schedulerPluginContainer) {

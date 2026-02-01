@@ -18,8 +18,8 @@
 package org.apache.hadoop.hbase.ipc;
 
 import com.engineersbox.kairos.Kairos;
-import com.engineersbox.kairos.TaskRunnable;
-import com.engineersbox.kairos.TaskRunnableContainer;
+import com.engineersbox.kairos.OperationRunnable;
+import com.engineersbox.kairos.OperationRunnableContainer;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.context.Scope;
@@ -33,7 +33,6 @@ import org.apache.hadoop.hbase.monitoring.MonitoredRPCHandler;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.server.trace.IpcServerSpanBuilder;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos;
 import org.apache.hadoop.hbase.trace.TraceUtil;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
@@ -41,11 +40,8 @@ import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
-
 import org.apache.hbase.thirdparty.com.google.protobuf.Message;
 import org.bytedeco.javacpp.Pointer;
-import org.bytedeco.javacpp.PointerScope;
-import org.bytedeco.javacpp.annotation.Cast;
 
 /**
  * The request processing logic, which is usually executed in thread pools provided by an
@@ -53,7 +49,7 @@ import org.bytedeco.javacpp.annotation.Cast;
  */
 @InterfaceAudience.LimitedPrivate({ HBaseInterfaceAudience.COPROC, HBaseInterfaceAudience.PHOENIX })
 @InterfaceStability.Evolving
-public class CallRunner extends TaskRunnable {
+public class CallRunner extends OperationRunnable {
 
   private static final CallDroppedException CALL_DROPPED_EXCEPTION = new CallDroppedException();
 
@@ -106,7 +102,7 @@ public class CallRunner extends TaskRunnable {
   }
 
   @Override
-  public void run(final TaskRunnableContainer container, final Pointer ctx,
+  public void run(final OperationRunnableContainer container, final Pointer ctx,
     final long operationID) {
     this.operationID = operationID;
     run();
@@ -301,13 +297,13 @@ public class CallRunner extends TaskRunnable {
     return this.call.getParam() instanceof ClientProtos.ScanRequest;
   }
 
-  public Kairos.TaskKind getTaskKind() {
+  public Kairos.OperationKind getOperationKind() {
     if (isWriteRequest()) {
-      return Kairos.TaskKind.Write;
+      return Kairos.OperationKind.Write;
     } else if (isScanRequest()) {
-      return Kairos.TaskKind.Scan;
+      return Kairos.OperationKind.Scan;
     }
-    return Kairos.TaskKind.Read;
+    return Kairos.OperationKind.Read;
   }
 
 }

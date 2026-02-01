@@ -2,12 +2,14 @@ package org.apache.hadoop.hbase.ipc;
 
 import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.OptionalGenericError;
-import com.engineersbox.kairos.TaskRunnableBox;
+import com.engineersbox.kairos.OperationRunnableBox;
 import com.engineersbox.kairos.WorkerGroup;
 import com.engineersbox.kairos.WorkerGroupBox;
 import com.engineersbox.kairos.WorkerGroupContainer;
 import com.engineersbox.kairos.WorkerGroupProvider;
+import com.engineersbox.kairos.WorkerGroupProviderBox;
 import com.engineersbox.kairos.WorkerGroupProviderContainer;
+import com.engineersbox.kairos.conversion.IntoBox;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
 import com.engineersbox.kairos.utils.OptionalUtils;
 import com.google.common.base.Preconditions;
@@ -102,18 +104,18 @@ public class RpcHandlerPool extends WorkerGroup {
   private final AtomicInteger failedHandlerCount = new AtomicInteger(0);
 
   protected QueueBalancer balancer;
-  private final AtomicBoolean flushing = new AtomicBoolean(false);
+  protected final AtomicBoolean flushing = new AtomicBoolean(false);
 
-  private String name;
-  private final int rawHandlerCount;
-  private final String callQueueType;
-  private final int maxQueueLength;
-  private final int port;
-  private final PriorityFunction priority;
-  private final Configuration conf;
-  private final Abortable abortable;
+  protected String name;
+  protected final int rawHandlerCount;
+  protected final String callQueueType;
+  protected final int maxQueueLength;
+  protected final int port;
+  protected final PriorityFunction priority;
+  protected final Configuration conf;
+  protected final Abortable abortable;
 
-  private final TransparentPointerScope ptrScope;
+  protected final TransparentPointerScope ptrScope;
 
   public RpcHandlerPool(final String name, final int handlerCount, final int maxQueueLength,
     final int port, final PriorityFunction priority, final Configuration conf, final Abortable abortable) {
@@ -143,11 +145,6 @@ public class RpcHandlerPool extends WorkerGroup {
     for (int i = 0; i < numQueues; ++i) {
       queues.add(ReflectionUtils.newInstance(queueClass, queueInitArgs));
     }
-  }
-
-  @Override
-  public int capabilities(final WorkerGroupContainer workerGroupContainer) {
-    return Kairos.WG_CAP_ASSIGN | Kairos.WG_CAP_RESIZE;
   }
 
   @Override
@@ -218,7 +215,7 @@ public class RpcHandlerPool extends WorkerGroup {
 
   @Override
   public OptionalGenericError assign(final WorkerGroupContainer container,
-    final TaskRunnableBox taskRunnable, final Pointer ctx, final long operationID) {
+    final OperationRunnableBox taskRunnable, final Pointer ctx, final long operationID) {
     if (this.flushing.get()) {
       LOGGER.warn("Queue is flushing, dropping task for operation {}", operationID);
       return OptionalUtils.some(
@@ -249,10 +246,6 @@ public class RpcHandlerPool extends WorkerGroup {
   @Override
   public long size(final WorkerGroupContainer workerGroupContainer) {
     return this.handlerCount;
-  }
-
-  @Override public Pointer getProperty(WorkerGroupContainer workerGroupContainer, long l) {
-    return super.getProperty(workerGroupContainer, l);
   }
 
   public void start(final int port) {
@@ -290,15 +283,15 @@ public class RpcHandlerPool extends WorkerGroup {
     final List<BlockingQueue<CallRunner>> callQueues, final int qindex, final int qsize,
     final int port, final AtomicInteger activeHandlerCount) {
     final String threadPrefix = name + Strings.nullToEmpty(nameSuffix);
-    double handlerFailureThreshhold = conf == null
+    final double handlerFailureThreshhold = conf == null
       ? 1.0
       : conf.getDouble(HConstants.REGION_SERVER_HANDLER_ABORT_ON_ERROR_PERCENT,
       HConstants.DEFAULT_REGION_SERVER_HANDLER_ABORT_ON_ERROR_PERCENT);
     for (int i = 0; i < numHandlers; i++) {
       final int index = qindex + (i % qsize);
-      String name = "RpcServer." + threadPrefix + ".handler=" + handlers.size() + ",queue=" + index
+      final String name = "RpcServer." + threadPrefix + ".handler=" + handlers.size() + ",queue=" + index
         + ",port=" + port;
-      RpcHandler handler = getHandler(name, handlerFailureThreshhold, handlerCount,
+      final RpcHandler handler = getHandler(name, handlerFailureThreshhold, handlerCount,
         callQueues.get(index), activeHandlerCount, failedHandlerCount, abortable);
       handler.start();
       handlers.add(handler);
@@ -483,7 +476,8 @@ public class RpcHandlerPool extends WorkerGroup {
     }
   }
 
-  public static class Provider extends WorkerGroupProvider {
+  public static class Provider extends WorkerGroupProvider implements
+    IntoBox<WorkerGroupProviderBox> {
 
     private final String name;
     private final int port;

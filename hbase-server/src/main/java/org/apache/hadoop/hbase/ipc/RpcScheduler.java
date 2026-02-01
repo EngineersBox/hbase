@@ -44,8 +44,8 @@ public abstract class RpcScheduler extends SchedulerPlugin {
   public static final String IPC_SERVER_BULKLOAD_MAX_CALLQUEUE_LENGTH =
     "hbase.ipc.server.bulkload.max.callqueue.length";
 
-  public RpcScheduler(SliceU8 instanceName, SchedulerArgs args, LoggerDrainBox loggerDrain,
-    ArcVoid pluginCtx) {
+  public RpcScheduler(final SliceU8 instanceName, final SchedulerArgs args, final LoggerDrainBox loggerDrain,
+    final ArcVoid pluginCtx) {
     super(instanceName, args, loggerDrain, pluginCtx);
   }
 
@@ -60,13 +60,6 @@ public abstract class RpcScheduler extends SchedulerPlugin {
    * @param context provides methods to retrieve runtime information from
    */
   public abstract void init(Context context);
-
-  /**
-   * Dispatches an RPC request asynchronously. An implementation is free to choose to process the
-   * request immediately or delay it for later processing.
-   * @param task the request to be dispatched
-   */
-//  public abstract boolean dispatch(CallRunner task);
 
   /** Get call queue information **/
   public abstract CallQueueInfo getCallQueueInfo();

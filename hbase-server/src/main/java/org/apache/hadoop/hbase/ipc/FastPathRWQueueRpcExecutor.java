@@ -17,13 +17,24 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
-import java.util.Deque;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentLinkedDeque;
-import java.util.concurrent.atomic.AtomicInteger;
+import com.engineersbox.kairos.ArcVoid;
+import com.engineersbox.kairos.Kairos;
+import com.engineersbox.kairos.LoggerDrainBox;
+import com.engineersbox.kairos.OptionalGenericError;
+import com.engineersbox.kairos.SchedulerArgs;
+import com.engineersbox.kairos.SchedulerIDOrKairosResult;
+import com.engineersbox.kairos.SchedulerPluginArcBox;
+import com.engineersbox.kairos.SchedulerPluginContainer;
+import com.engineersbox.kairos.SchedulerPluginCreator;
+import com.engineersbox.kairos.SliceU8;
+import com.engineersbox.kairos.Operation;
+import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.SliceUtils;
+import com.google.common.base.Strings;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
+import org.apache.hadoop.hbase.executor.Scheduling;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 
@@ -35,37 +46,118 @@ import org.apache.yetus.audience.InterfaceStability;
 @InterfaceStability.Evolving
 public class FastPathRWQueueRpcExecutor extends RWQueueRpcExecutor {
 
-  private final Deque<FastPathRpcHandler> readHandlerStack = new ConcurrentLinkedDeque<>();
-  private final Deque<FastPathRpcHandler> writeHandlerStack = new ConcurrentLinkedDeque<>();
-  private final Deque<FastPathRpcHandler> scanHandlerStack = new ConcurrentLinkedDeque<>();
-
-  public FastPathRWQueueRpcExecutor(String name, int handlerCount, int maxQueueLength,
-    PriorityFunction priority, Configuration conf, Abortable abortable) {
-    super(name, handlerCount, maxQueueLength, priority, conf, abortable);
+  public FastPathRWQueueRpcExecutor(final String name, final int port, final int handlerCount,
+    final Configuration conf, final TransparentPointerScope scope, final SchedulerArgs schedulerArgs,
+    final LoggerDrainBox loggerDrain, final ArcVoid pluginCtx) {
+    super(name, port, handlerCount, conf, scope, schedulerArgs, loggerDrain, pluginCtx);
   }
 
   @Override
-  protected RpcHandler getHandler(final String name, final double handlerFailureThreshhold,
-    final int handlerCount, final BlockingQueue<CallRunner> q,
-    final AtomicInteger activeHandlerCount, final AtomicInteger failedHandlerCount,
-    final Abortable abortable) {
-    Deque<FastPathRpcHandler> handlerStack = name.contains("read") ? readHandlerStack
-      : name.contains("write") ? writeHandlerStack
-      : scanHandlerStack;
-    return new FastPathRpcHandler(name, handlerFailureThreshhold, handlerCount, q,
-      activeHandlerCount, failedHandlerCount, abortable, handlerStack);
+  public boolean submit(final SchedulerPluginContainer schedulerPluginContainer, final Operation task,
+    final long operation_id) {
+    final CallRunner callOperation = task.runnable().container().instance().instance().getPointer(
+      CallRunner.class);
+    OptionalGenericError result;
+    if (callOperation.isWriteRequest()) {
+      result = super.writePool.assignDirect(
+        super.writeWorkerGroupBox.container(),
+        0,
+        task.runnable(),
+        task.context(),
+        operation_id
+      );
+    } else if (shouldDispatchToScanQueue(callOperation)) {
+      result = super.scanPool.assignDirect(
+        super.scanWorkerGroupBox.container(),
+        0,
+        task.runnable(),
+        task.context(),
+        operation_id
+      );
+    } else {
+      result = super.readPool.assignDirect(
+        super.readWorkerGroupBox.container(),
+        0,
+        task.runnable(),
+        task.context(),
+        operation_id
+      );
+    }
+    if (result.tag().intern() == Kairos.OptionalGenericErrorTag.None_GenericError) {
+      return true;
+    } else if (result.some().intern() == Kairos.GenericError.GENERIC_ERROR_RETRY) {
+      super.submit(schedulerPluginContainer, task, operation_id);
+    }
+    return false;
   }
 
-  @Override
-  public boolean dispatch(final CallRunner callTask) {
-    RpcCall call = callTask.getRpcCall();
-    boolean shouldDispatchToWriteQueue = isWriteRequest(call.getHeader(), call.getParam());
-    boolean shouldDispatchToScanQueue = shouldDispatchToScanQueue(callTask);
-    FastPathRpcHandler handler = shouldDispatchToWriteQueue ? writeHandlerStack.poll()
-      : shouldDispatchToScanQueue ? scanHandlerStack.poll()
-      : readHandlerStack.poll();
-    return handler != null
-      ? handler.loadCallRunner(callTask)
-      : dispatchTo(shouldDispatchToWriteQueue, shouldDispatchToScanQueue, callTask);
+  public static SchedulerIDOrKairosResult newFastPathRWQueue(final String name, final int port,
+    final int handlerCount, final Configuration conf, final PriorityFunction priority,
+    final Abortable abortable, final TransparentPointerScope ptrScope) {
+    try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+      final FastPathRpcHandlerPool.Provider wgProvider = tempScope.attachTransparent(
+        new FastPathRpcHandlerPool.Provider(name, port, priority, conf, abortable,
+          ptrScope));
+      final Creator creator = Creator.newInstance(name, port, handlerCount, conf, ptrScope);
+
+      return Kairos.runSchedulerInstance(
+        Scheduling.KAIROS,
+        SliceUtils.fromString(name, tempScope),
+        ptrScope.attachTransparent(creator.intoDescriptor()),
+        tempScope.attachTransparent(wgProvider.intoBox()),
+        Kairos.newDummyLoggerDrain()
+      );
+    }
+  }
+
+  public static class Creator extends SchedulerPluginCreator {
+
+    private final String name;
+    private final int port;
+    private final int handlerCount;
+    private final Configuration conf;
+
+    private final TransparentPointerScope runtimeScope;
+
+    private Creator(final SliceU8 name, final int port, final int handlerCount,
+      final Configuration conf, final SliceU8 description, final TransparentPointerScope runtimeScope) {
+      super(name, description);
+      this.name = SliceUtils.intoString(name);
+      this.port = port;
+      this.handlerCount = handlerCount;
+      this.conf = conf;
+      this.runtimeScope = runtimeScope;
+    }
+
+    public static Creator newInstance(final String name, final int port, final int handlerCount,
+      final Configuration conf, final TransparentPointerScope runtimeScope) {
+      try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+        return new Creator(
+          SliceUtils.fromString(Strings.nullToEmpty(name), tempScope),
+          port,
+          handlerCount,
+          conf,
+          SliceUtils.fromString("", tempScope),
+          runtimeScope
+        );
+      }
+    }
+
+    @Override
+    public int createSchedulerInstance(final SliceU8 name, final SchedulerArgs schedulerArgs,
+      final ArcVoid pluginCtx, final LoggerDrainBox loggerDrainBox, final SchedulerPluginArcBox schedulerPlugin) {
+      final RWQueueRpcExecutor executor = this.runtimeScope.attachTransparent(new RWQueueRpcExecutor(
+        this.name,
+        this.port,
+        this.handlerCount,
+        this.conf,
+        new TransparentPointerScope(),
+        schedulerArgs,
+        loggerDrainBox,
+        pluginCtx
+      ));
+      executor.saturateArcBox(schedulerPlugin);
+      return 0;
+    }
   }
 }

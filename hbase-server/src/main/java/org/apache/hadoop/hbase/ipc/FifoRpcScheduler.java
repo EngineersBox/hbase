@@ -44,7 +44,8 @@ public class FifoRpcScheduler extends RpcScheduler {
   protected final AtomicInteger queueSize = new AtomicInteger(0);
   protected ThreadPoolExecutor executor;
 
-  public FifoRpcScheduler(Configuration conf, int handlerCount) {
+  public FifoRpcScheduler(final, Configuration conf, int handlerCount) {
+    super();
     this.handlerCount = handlerCount;
     this.maxQueueLength = conf.getInt(RpcScheduler.IPC_SERVER_MAX_CALLQUEUE_LENGTH,
       handlerCount * RpcServer.DEFAULT_MAX_CALLQUEUE_LENGTH_PER_HANDLER);

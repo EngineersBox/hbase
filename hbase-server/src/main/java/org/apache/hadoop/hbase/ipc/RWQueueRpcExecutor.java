@@ -30,22 +30,25 @@ import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.LoggerDrainBox;
 import com.engineersbox.kairos.OptionalGenericError;
 import com.engineersbox.kairos.SchedulerArgs;
+import com.engineersbox.kairos.SchedulerIDOrKairosResult;
 import com.engineersbox.kairos.SchedulerPluginArcBox;
 import com.engineersbox.kairos.SchedulerPluginContainer;
 import com.engineersbox.kairos.SchedulerPluginCreator;
 import com.engineersbox.kairos.SliceU8;
-import com.engineersbox.kairos.Task;
+import com.engineersbox.kairos.Operation;
 import com.engineersbox.kairos.WorkerGroupBox;
 import com.engineersbox.kairos.WorkerGroupProviderBox;
 import com.engineersbox.kairos.WorkerGroupProviderVTable;
+import com.engineersbox.kairos.conversion.IntoBox;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
 import com.engineersbox.kairos.utils.SliceUtils;
-import com.engineersbox.kairos.utils.TaskUtils;
+import com.engineersbox.kairos.utils.OperationUtils;
 import com.google.common.base.Strings;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.conf.ConfigurationObserver;
+import org.apache.hadoop.hbase.executor.Scheduling;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 import org.slf4j.Logger;
@@ -75,12 +78,12 @@ public class RWQueueRpcExecutor extends RpcExecutor {
   public static final String CALL_QUEUE_SCAN_SHARE_CONF_KEY =
     "hbase.ipc.server.callqueue.scan.ratio";
 
-  private WorkerGroupBox writeWorkerGroupBox;
-  private RpcHandlerPool writePool;
-  private WorkerGroupBox readWorkerGroupBox;
-  private RpcHandlerPool readPool;
-  private WorkerGroupBox scanWorkerGroupBox;
-  private RpcHandlerPool scanPool;
+  protected WorkerGroupBox writeWorkerGroupBox;
+  protected RpcHandlerPool writePool;
+  protected WorkerGroupBox readWorkerGroupBox;
+  protected RpcHandlerPool readPool;
+  protected WorkerGroupBox scanWorkerGroupBox;
+  protected RpcHandlerPool scanPool;
 
   private int port;
 
@@ -89,30 +92,21 @@ public class RWQueueRpcExecutor extends RpcExecutor {
   private final int scanHandlersCount;
   private final int numScanQueues;
 
-  private final AtomicInteger activeWriteHandlerCount = new AtomicInteger(0);
-  private final AtomicInteger activeReadHandlerCount = new AtomicInteger(0);
-  private final AtomicInteger activeScanHandlerCount = new AtomicInteger(0);
-
   public RWQueueRpcExecutor(final String name, final int port, final int handlerCount,
     final Configuration conf, final TransparentPointerScope scope, final SchedulerArgs schedulerArgs,
     final LoggerDrainBox loggerDrain, final ArcVoid pluginCtx) {
     super(name, scope, schedulerArgs, loggerDrain, pluginCtx);
     this.port = port;
-
     final float callqReadShare = getReadShare(conf);
     final float callqScanShare = getScanShare(conf);
-
     final int numCallQueues = computeNumCallQueues(
       handlerCount,
       RpcExecutor.getCallQueuesHandlersFactor(conf)
     );
-
     int numWriteQueues = calcNumWriters(numCallQueues, callqReadShare);
     this.writeHandlersCount = Math.max(numWriteQueues, calcNumWriters(handlerCount, callqReadShare));
-
     int readQueues = calcNumReaders(numCallQueues, callqReadShare);
     int readHandlers = Math.max(readQueues, calcNumReaders(handlerCount, callqReadShare));
-
     int scanHandlers = Math.max(0, (int) Math.floor(readHandlers * callqScanShare));
     int scanQueues =
       scanHandlers > 0 ? Math.max(1, (int) Math.floor(readQueues * callqScanShare)) : 0;
@@ -121,23 +115,11 @@ public class RWQueueRpcExecutor extends RpcExecutor {
       readQueues = Math.max(1, readQueues - scanQueues);
       readHandlers -= scanHandlers;
     }
-
     final int numReadQueues = readQueues;
     this.readHandlersCount = readHandlers;
     this.numScanQueues = scanQueues;
     this.scanHandlersCount = scanHandlers;
-
     bindWorkers(null, schedulerArgs.worker_group_provider());
-
-//    this.writeBalancer = getBalancer(name, conf, queues.subList(0, numWriteQueues));
-//    this.readBalancer =
-//      getBalancer(name, conf, queues.subList(numWriteQueues, numWriteQueues + numReadQueues));
-//    this.scanBalancer = numScanQueues > 0
-//      ? getBalancer(name, conf,
-//        queues.subList(numWriteQueues + numReadQueues,
-//          numWriteQueues + numReadQueues + numScanQueues))
-//      : null;
-
     LOGGER.info(getName() + " writeQueues=" + numWriteQueues + " writeHandlers=" + writeHandlersCount
       + " readQueues=" + numReadQueues + " readHandlers=" + readHandlersCount + " scanQueues="
       + numScanQueues + " scanHandlers=" + scanHandlersCount);
@@ -236,7 +218,7 @@ public class RWQueueRpcExecutor extends RpcExecutor {
   }
 
   @Override
-  public boolean submit(final SchedulerPluginContainer schedulerPluginContainer, final Task task,
+  public boolean submit(final SchedulerPluginContainer schedulerPluginContainer, final Operation task,
     final long operation_id) {
     final CallRunner callRunner = task.runnable().container().instance().instance().getPointer(CallRunner.class);
     if (callRunner.isWriteRequest()) {
@@ -403,9 +385,18 @@ public class RWQueueRpcExecutor extends RpcExecutor {
     this.scanPool.onConfigurationChange(conf);
   }
 
-  private void propagateBalancerConfigChange(QueueBalancer balancer, Configuration conf) {
-    if (balancer instanceof ConfigurationObserver) {
-      ((ConfigurationObserver) balancer).onConfigurationChange(conf);
+  public static SchedulerIDOrKairosResult newRWQueue(final String name, final int port,
+    final int handlerCount, final Configuration conf, final IntoBox<WorkerGroupProviderBox> wgProvider,
+    final TransparentPointerScope ptrScope) {
+    try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+      final Creator creator = Creator.newInstance(name, port, handlerCount, conf, ptrScope);
+      return Kairos.runSchedulerInstance(
+        Scheduling.KAIROS,
+        SliceUtils.fromString(name, tempScope),
+        ptrScope.attachTransparent(creator.intoDescriptor()),
+        tempScope.attachTransparent(wgProvider.intoBox()),
+        Kairos.newDummyLoggerDrain()
+      );
     }
   }
 

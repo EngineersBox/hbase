@@ -17,14 +17,20 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
+import com.engineersbox.kairos.ArcVoid;
 import com.engineersbox.kairos.Kairos;
+import com.engineersbox.kairos.LoggerDrainBox;
+import com.engineersbox.kairos.SchedulerArgs;
+import com.engineersbox.kairos.SchedulerIDOrKairosResult;
+import com.engineersbox.kairos.SchedulerPluginArcBox;
 import com.engineersbox.kairos.SchedulerPluginContainer;
+import com.engineersbox.kairos.SchedulerPluginCreator;
 import com.engineersbox.kairos.SliceU8;
-import com.engineersbox.kairos.Task;
-import com.engineersbox.kairos.TaskMetadataOrKairosResult;
+import com.engineersbox.kairos.Operation;
+import com.engineersbox.kairos.OperationMetadataOrKairosResult;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
 import com.engineersbox.kairos.utils.SliceUtils;
-import com.engineersbox.kairos.utils.TaskUtils;
+import com.google.common.base.Strings;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
@@ -55,20 +61,20 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
   private int port;
   private final PriorityFunction priority;
   private final RpcExecutor callExecutor;
-  private final SliceU8 callExecutorName;
+  private final long callExecutorID;
   private final RpcExecutor priorityExecutor;
-  private final SliceU8 priorityExecutorName;
+  private final long priorityExecutorID;
   private final RpcExecutor replicationExecutor;
-  private final SliceU8 replicationExecutorName;
+  private final long replicationExecutorID;
 
   /**
    * This executor is only for meta transition
    */
   private final RpcExecutor metaTransitionExecutor;
-  private final SliceU8 metaTransitionExecutorName;
+  private final long metaTransitionExecutorID;
 
   private final RpcExecutor bulkloadExecutor;
-  private final SliceU8 bulkloadExecutorName;
+  private final long bulkloadExecutorID;
 
   /** What level a high priority call is at. */
   private final int highPriorityLevel;
@@ -83,9 +89,12 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
    * @param replicationHandlerCount How many threads for replication handling.
    * @param priority                Function to extract request priority.
    */
-  public SimpleRpcScheduler(Configuration conf, int handlerCount, int priorityHandlerCount,
-    int replicationHandlerCount, int metaTransitionHandler, PriorityFunction priority,
-    Abortable server, int highPriorityLevel, final TransparentPointerScope ptrScope) {
+  public SimpleRpcScheduler(final SliceU8 name, final Configuration conf, int handlerCount,
+    final int priorityHandlerCount, final int replicationHandlerCount, final int metaTransitionHandler,
+    final PriorityFunction priority, final Abortable server, final int highPriorityLevel,
+    final TransparentPointerScope ptrScope, final SchedulerArgs schedulerArgs, final LoggerDrainBox loggerDrain,
+    final ArcVoid pluginCtx) {
+    super(name, schedulerArgs, loggerDrain, pluginCtx);
     this.ptrScope = ptrScope;
     int bulkLoadHandlerCount = conf.getInt(HConstants.REGION_SERVER_BULKLOAD_HANDLER_COUNT,
       HConstants.DEFAULT_REGION_SERVER_BULKLOAD_HANDLER_COUNT);
@@ -109,13 +118,25 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
 
     if (callqReadShare > 0) {
       // at least 1 read handler and 1 write handler
-      callExecutor = new FastPathRWQueueRpcExecutor("default.FPRWQ", Math.max(2, handlerCount),
-        maxQueueLength, priority, conf, server);
+      final SchedulerIDOrKairosResult result = FastPathRWQueueRpcExecutor.newFastPathRWQueue("default.FPRWQ", Math.max(2, handlerCount),
+        handlerCount, conf, priority, server, this.ptrScope);
+      if (result.tag().intern() == Kairos.SchedulerIDOrKairosResultTag.Err_SchedulerID__KairosResult) {
+        throw new RuntimeException("Failed to create call executor: " + result.err().intern().name());
+      }
+      this.callExecutorID = result.ok();
+//      callExecutor = new FastPathRWQueueRpcExecutor("default.FPRWQ", Math.max(2, handlerCount),
+//        maxQueueLength, priority, conf, server);
     } else {
       if (
         RpcHandlerPool.isFifoQueueType(callQueueType) || RpcHandlerPool.isCodelQueueType(callQueueType)
           || RpcHandlerPool.isPluggableQueueWithFastPath(callQueueType, conf)
       ) {
+        final SchedulerIDOrKairosResult result = FastPathBalancedQueueRpcExecutor.newFastPathBalancedQueue(
+          "default.FPBQ", port, handlerCount, conf, priority, server, ptrScope);
+        if (result.tag().intern() == Kairos.SchedulerIDOrKairosResultTag.Err_SchedulerID__KairosResult) {
+          throw new RuntimeException("Failed to create call executor: " + result.err().intern().name());
+        }
+        this.callExecutorID = result.ok();
         callExecutor = new FastPathBalancedQueueRpcExecutor("default.FPBQ", handlerCount,
           maxQueueLength, priority, conf, server);
       } else {
@@ -173,11 +194,12 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
     }
   }
 
-  public SimpleRpcScheduler(Configuration conf, int handlerCount, int priorityHandlerCount,
-    int replicationHandlerCount, PriorityFunction priority, int highPriorityLevel,
-    final TransparentPointerScope ptrScope) {
-    this(conf, handlerCount, priorityHandlerCount, replicationHandlerCount, 0, priority, null,
-      highPriorityLevel, ptrScope);
+  public SimpleRpcScheduler(final SliceU8 name, final Configuration conf, final int handlerCount,
+    final int priorityHandlerCount, final int replicationHandlerCount, final PriorityFunction priority,
+    final int highPriorityLevel, final TransparentPointerScope ptrScope, final SchedulerArgs schedulerArgs,
+    final LoggerDrainBox loggerDrain, final ArcVoid pluginCtx) {
+    this(name, conf, handlerCount, priorityHandlerCount, replicationHandlerCount, 0, priority, null,
+      highPriorityLevel, ptrScope, schedulerArgs, loggerDrain, pluginCtx);
   }
 
   /**
@@ -210,47 +232,60 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
   }
 
   @Override
-  public void init(Context context) {
+  public void init(final Context context) {
     this.port = context.getListenerAddress().getPort();
+  }
+
+  private void startExecutor(final String name, final SliceU8 sliceName) {
+    Kairos.KairosResult result = Kairos.startScheduler(Scheduling.KAIROS, sliceName);
+    if (result.intern() != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
+      throw new RuntimeException(String.format("Failed to start %s} executor", name));
+    }
   }
 
   @Override
   public void start(final SchedulerPluginContainer schedulerPluginContainer) {
-    callExecutor.start();
+    startExecutor("call", this.callExecutorName);
     if (priorityExecutor != null) {
-      priorityExecutor.start(schedulerPluginContainer);
+      startExecutor("priority", this.priorityExecutorName);
     }
     if (replicationExecutor != null) {
-      replicationExecutor.start(schedulerPluginContainer);
+      startExecutor("replication", this.replicationExecutorName);
     }
     if (metaTransitionExecutor != null) {
-      metaTransitionExecutor.start(schedulerPluginContainer);
+      startExecutor("meta-transition", this.metaTransitionExecutorName);
     }
     if (bulkloadExecutor != null) {
-      bulkloadExecutor.start(schedulerPluginContainer);
+      startExecutor("bulkload", this.bulkloadExecutorName);
     }
+  }
 
+  private void stopExecutor(final String name, final SliceU8 sliceName) {
+    Kairos.KairosResult result = Kairos.stopScheduler(Scheduling.KAIROS, sliceName);
+    if (result.intern() != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
+      throw new RuntimeException(String.format("Failed to stop %s executor", name));
+    }
   }
 
   @Override
   public void stop(final SchedulerPluginContainer schedulerPluginContainer) {
-    callExecutor.stop(schedulerPluginContainer);
+    stopExecutor("call", this.callExecutorName);
     if (priorityExecutor != null) {
-      priorityExecutor.stop(schedulerPluginContainer);
+      stopExecutor("priority", this.priorityExecutorName);
     }
     if (replicationExecutor != null) {
-      replicationExecutor.stop(schedulerPluginContainer);
+      stopExecutor("replication", this.replicationExecutorName);
     }
     if (metaTransitionExecutor != null) {
-      metaTransitionExecutor.stop(schedulerPluginContainer);
+      stopExecutor("meta-transition", this.metaTransitionExecutorName);
     }
     if (bulkloadExecutor != null) {
-      bulkloadExecutor.stop(schedulerPluginContainer);
+      stopExecutor("bulkload", this.bulkloadExecutorName);
     }
   }
 
   @Override
-  public boolean submit(final SchedulerPluginContainer schedulerPluginContainer, final Task task,
+  public boolean submit(final SchedulerPluginContainer schedulerPluginContainer, final Operation task,
     final long operation_id) {
     final CallRunner callRunner = task.runnable().container().instance().instance().getPointer(CallRunner.class);
     RpcCall call = callRunner.getRpcCall();
@@ -259,7 +294,7 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
     if (level == HConstants.PRIORITY_UNSET) {
       level = HConstants.NORMAL_QOS;
     }
-    TaskMetadataOrKairosResult result;
+    OperationMetadataOrKairosResult result;
     if (
       metaTransitionExecutor != null
         && level == MasterAnnotationReadingPriorityFunction.META_TRANSITION_QOS
@@ -274,7 +309,7 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
     } else {
       result = Kairos.submit(Scheduling.KAIROS, this.callExecutorName, task);
     }
-    if (result.tag().intern() == Kairos.TaskMetadataOrKairosResultTag.Err_TaskMetadata__KairosResult) {
+    if (result.tag().intern() == Kairos.OperationMetadataOrKairosResultTag.Err_OperationMetadata__KairosResult) {
       LOGGER.error("Failed to dispatch task {}", operation_id);
       return true;
     }
@@ -420,6 +455,86 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
     }
 
     return callQueueInfo;
+  }
+
+  public static class Creator extends SchedulerPluginCreator {
+
+    private final String name;
+    private final Context context;
+    private final int handlerCount;
+    private final int priorityHandlerCount;
+    private final int replicationHandlerCount;
+    private final int metaTransitionHandler;
+    private final PriorityFunction priority;
+    private final Abortable server;
+    private final int highPriorityLevel;
+    private final Configuration conf;
+
+    private final TransparentPointerScope runtimeScope;
+
+    public Creator(final SliceU8 name, final Context context, final int handlerCount, final int priorityHandlerCount,
+      final int replicationHandlerCount, final int metaTransitionHandler, final PriorityFunction priority,
+      Abortable server, int highPriorityLevel, final Configuration conf, final SliceU8 description,
+      final TransparentPointerScope runtimeScope) {
+      super(name, description);
+      this.name = SliceUtils.intoString(name);
+      this.context = context;
+      this.handlerCount = handlerCount;
+      this.priorityHandlerCount = priorityHandlerCount;
+      this.replicationHandlerCount = replicationHandlerCount;
+      this.metaTransitionHandler = metaTransitionHandler;
+      this.priority = priority;
+      this.server = server;
+      this.highPriorityLevel = highPriorityLevel;
+      this.conf = conf;
+      this.runtimeScope = runtimeScope;
+    }
+
+    public static Creator newInstance(final String name, final Context context, final int handlerCount,
+      final int priorityHandlerCount, final int replicationHandlerCount, final int metaTransitionHandler,
+      final PriorityFunction priority, final Abortable server, final int highPriorityLevel,
+      final Configuration conf, final TransparentPointerScope runtimeScope) {
+      try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+        return new Creator(
+          SliceUtils.fromString(Strings.nullToEmpty(name), tempScope),
+          context,
+          handlerCount,
+          priorityHandlerCount,
+          replicationHandlerCount,
+          metaTransitionHandler,
+          priority,
+          server,
+          highPriorityLevel,
+          conf,
+          SliceUtils.fromString("", tempScope),
+          runtimeScope
+        );
+      }
+    }
+
+
+    @Override
+    public int createSchedulerInstance(final SliceU8 name, final SchedulerArgs schedulerArgs,
+      final ArcVoid pluginCtx, final LoggerDrainBox loggerDrainBox, final SchedulerPluginArcBox schedulerPlugin) {
+      final SimpleRpcScheduler scheduler = this.runtimeScope.attachTransparent(new SimpleRpcScheduler(
+        name,
+        this.conf,
+        this.handlerCount,
+        this.priorityHandlerCount,
+        this.replicationHandlerCount,
+        this.metaTransitionHandler,
+        this.priority,
+        this.server,
+        this.highPriorityLevel,
+        this.runtimeScope,
+        schedulerArgs,
+        loggerDrainBox,
+        pluginCtx
+      ));
+      scheduler.init(this.context);
+      scheduler.saturateArcBox(schedulerPlugin);
+      return 0;
+    }
   }
 
 }

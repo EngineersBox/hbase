@@ -17,6 +17,15 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
+import com.engineersbox.kairos.ArcVoid;
+import com.engineersbox.kairos.LoggerDrainBox;
+import com.engineersbox.kairos.SchedulerArgs;
+import com.engineersbox.kairos.SchedulerPluginArcBox;
+import com.engineersbox.kairos.SchedulerPluginCreator;
+import com.engineersbox.kairos.SliceU8;
+import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.SliceUtils;
+import com.google.common.base.Strings;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.yetus.audience.InterfaceAudience;
@@ -34,9 +43,10 @@ public class MetaRWQueueRpcExecutor extends RWQueueRpcExecutor {
     "hbase.ipc.server.metacallqueue.scan.ratio";
   public static final float DEFAULT_META_CALL_QUEUE_READ_SHARE = 0.9f;
 
-  public MetaRWQueueRpcExecutor(final String name, final int handlerCount, final int maxQueueLength,
-    final PriorityFunction priority, final Configuration conf, final Abortable abortable) {
-    super(name, handlerCount, maxQueueLength, priority, conf, abortable);
+  public MetaRWQueueRpcExecutor(final String name, final int port, final int handlerCount,
+    final Configuration conf, final TransparentPointerScope scope, final SchedulerArgs schedulerArgs,
+    final LoggerDrainBox loggerDrain, final ArcVoid pluginCtx) {
+    super(name, port, handlerCount, conf, scope, schedulerArgs, loggerDrain, pluginCtx);
   }
 
   @Override
@@ -47,5 +57,56 @@ public class MetaRWQueueRpcExecutor extends RWQueueRpcExecutor {
   @Override
   protected float getScanShare(final Configuration conf) {
     return conf.getFloat(META_CALL_QUEUE_SCAN_SHARE_CONF_KEY, 0);
+  }
+
+  public static class Creator extends SchedulerPluginCreator {
+
+    private final String name;
+    private final int port;
+    private final int handlerCount;
+    private final Configuration conf;
+
+    private final TransparentPointerScope runtimeScope;
+
+    private Creator(final SliceU8 name, final int port, final int handlerCount,
+      final Configuration conf, final SliceU8 description, final TransparentPointerScope runtimeScope) {
+      super(name, description);
+      this.name = SliceUtils.intoString(name);
+      this.port = port;
+      this.handlerCount = handlerCount;
+      this.conf = conf;
+      this.runtimeScope = runtimeScope;
+    }
+
+    public static Creator newInstance(final String name, final int port, final int handlerCount,
+      final Configuration conf, final TransparentPointerScope runtimeScope) {
+      try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+        return new Creator(
+          SliceUtils.fromString(Strings.nullToEmpty(name), tempScope),
+          port,
+          handlerCount,
+          conf,
+          SliceUtils.fromString("", tempScope),
+          runtimeScope
+        );
+      }
+    }
+
+    @Override
+    public int createSchedulerInstance(final SliceU8 name, final SchedulerArgs schedulerArgs,
+      final ArcVoid pluginCtx, final LoggerDrainBox loggerDrainBox, final SchedulerPluginArcBox schedulerPlugin) {
+      final MetaRWQueueRpcExecutor executor = this.runtimeScope.attachTransparent(new MetaRWQueueRpcExecutor(
+        this.name,
+        this.port,
+        this.handlerCount,
+        this.conf,
+        new TransparentPointerScope(),
+        schedulerArgs,
+        loggerDrainBox,
+        pluginCtx
+      ));
+      executor.saturateArcBox(schedulerPlugin);
+      return 0;
+    }
   }
 }

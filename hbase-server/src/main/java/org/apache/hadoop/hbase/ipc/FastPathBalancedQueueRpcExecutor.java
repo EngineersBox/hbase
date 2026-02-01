@@ -17,12 +17,23 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
-import java.util.Deque;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentLinkedDeque;
-import java.util.concurrent.atomic.AtomicInteger;
+import com.engineersbox.kairos.ArcVoid;
+import com.engineersbox.kairos.Kairos;
+import com.engineersbox.kairos.LoggerDrainBox;
+import com.engineersbox.kairos.OptionalGenericError;
+import com.engineersbox.kairos.SchedulerArgs;
+import com.engineersbox.kairos.SchedulerIDOrKairosResult;
+import com.engineersbox.kairos.SchedulerPluginArcBox;
+import com.engineersbox.kairos.SchedulerPluginContainer;
+import com.engineersbox.kairos.SchedulerPluginCreator;
+import com.engineersbox.kairos.SliceU8;
+import com.engineersbox.kairos.Operation;
+import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.SliceUtils;
+import com.google.common.base.Strings;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
+import org.apache.hadoop.hbase.executor.Scheduling;
 import org.apache.yetus.audience.InterfaceAudience;
 
 /**
@@ -36,45 +47,90 @@ import org.apache.yetus.audience.InterfaceAudience;
 public class FastPathBalancedQueueRpcExecutor extends BalancedQueueRpcExecutor {
   // Depends on default behavior of BalancedQueueRpcExecutor being FIFO!
 
-  /*
-   * Stack of Handlers waiting for work.
-   */
-  private final Deque<FastPathRpcHandler> fastPathHandlerStack = new ConcurrentLinkedDeque<>();
-
   public FastPathBalancedQueueRpcExecutor(final String name, final int handlerCount,
-    final int maxQueueLength, final PriorityFunction priority, final Configuration conf,
-    final Abortable abortable) {
-    super(name, handlerCount, maxQueueLength, priority, conf, abortable);
-  }
-
-  public FastPathBalancedQueueRpcExecutor(final String name, final int handlerCount,
-    final String callQueueType, final int maxQueueLength, final PriorityFunction priority,
-    final Configuration conf, final Abortable abortable) {
-    super(name, handlerCount, callQueueType, maxQueueLength, priority, conf, abortable);
+    final TransparentPointerScope scope, final SchedulerArgs schedulerArgs,
+    final LoggerDrainBox loggerDrain, final ArcVoid pluginCtx) {
+    super(name, handlerCount, scope, schedulerArgs, loggerDrain, pluginCtx);
   }
 
   @Override
-  protected RpcHandler getHandler(final String name, final double handlerFailureThreshhold,
-    final int handlerCount, final BlockingQueue<CallRunner> q,
-    final AtomicInteger activeHandlerCount, final AtomicInteger failedHandlerCount,
-    final Abortable abortable) {
-    return new FastPathRpcHandler(name, handlerFailureThreshhold, handlerCount, q,
-      activeHandlerCount, failedHandlerCount, abortable, fastPathHandlerStack);
-  }
-
-  @Override
-  public boolean dispatch(CallRunner callTask) {
-    // FastPathHandlers don't check queue limits, so if we're completely shut down
-    // we have to prevent ourselves from using the handler in the first place
-    if (currentQueueLimit == 0) {
-      return false;
+  public boolean submit(final SchedulerPluginContainer schedulerPluginContainer, final Operation task,
+    final long operation_id) {
+    final CallRunner callOperation = task.runnable().container().instance().instance().getPointer(
+      CallRunner.class);
+    final OptionalGenericError result = super.pool.assignDirect(
+      super.workerGroupBox.container(),
+      0,
+      task.runnable(),
+      task.context(),
+      operation_id
+    );
+    if (result.tag().intern() == Kairos.OptionalGenericErrorTag.None_GenericError) {
+      return true;
+    } else if (result.some().intern() == Kairos.GenericError.GENERIC_ERROR_RETRY) {
+      super.submit(schedulerPluginContainer, task, operation_id);
     }
-    FastPathRpcHandler handler = popReadyHandler();
-    return handler != null ? handler.loadCallRunner(callTask) : super.dispatch(callTask);
+    return false;
   }
 
-  /** Returns Pop a Handler instance if one available ready-to-go or else return null. */
-  private FastPathRpcHandler popReadyHandler() {
-    return this.fastPathHandlerStack.poll();
+  public static SchedulerIDOrKairosResult newFastPathBalancedQueue(final String name, final int port,
+    final int handlerCount, final Configuration conf, final PriorityFunction priority,
+    final Abortable abortable, final TransparentPointerScope ptrScope) {
+    try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+      final FastPathRpcHandlerPool.Provider wgProvider = tempScope.attachTransparent(
+        new FastPathRpcHandlerPool.Provider(name, port, priority, conf, abortable,
+          ptrScope));
+      final Creator creator = Creator.newInstance(name, handlerCount, ptrScope);
+      return Kairos.runSchedulerInstance(
+        Scheduling.KAIROS,
+        SliceUtils.fromString(name, tempScope),
+        ptrScope.attachTransparent(creator.intoDescriptor()),
+        tempScope.attachTransparent(wgProvider.intoBox()),
+        Kairos.newDummyLoggerDrain()
+      );
+    }
+  }
+
+  public static class Creator extends SchedulerPluginCreator {
+
+    private final String name;
+    private final int handlerCount;
+
+    private final TransparentPointerScope runtimeScope;
+
+    private Creator(final SliceU8 name, final int handlerCount, final SliceU8 description,
+      final TransparentPointerScope runtimeScope) {
+      super(name, description);
+      this.name = SliceUtils.intoString(name);
+      this.handlerCount = handlerCount;
+      this.runtimeScope = runtimeScope;
+    }
+
+    public static Creator newInstance(final String name, final int handlerCount,
+      final TransparentPointerScope runtimeScope) {
+      try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+        return new Creator(
+          SliceUtils.fromString(Strings.nullToEmpty(name), tempScope),
+          handlerCount,
+          SliceUtils.fromString("", tempScope),
+          runtimeScope
+        );
+      }
+    }
+
+    @Override
+    public int createSchedulerInstance(final SliceU8 name, final SchedulerArgs schedulerArgs,
+      final ArcVoid pluginCtx, final LoggerDrainBox loggerDrainBox, final SchedulerPluginArcBox schedulerPlugin) {
+      final FastPathBalancedQueueRpcExecutor executor = this.runtimeScope.attachTransparent(new FastPathBalancedQueueRpcExecutor(
+        this.name,
+        this.handlerCount,
+        new TransparentPointerScope(),
+        schedulerArgs,
+        loggerDrainBox,
+        pluginCtx
+      ));
+      executor.saturateArcBox(schedulerPlugin);
+      return 0;
+    }
   }
 }
