@@ -18,16 +18,22 @@
 package org.apache.hadoop.hbase.ipc;
 
 import com.engineersbox.kairos.ArcVoid;
+import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.LoggerDrainBox;
 import com.engineersbox.kairos.SchedulerArgs;
+import com.engineersbox.kairos.SchedulerIDOrKairosResult;
 import com.engineersbox.kairos.SchedulerPluginArcBox;
 import com.engineersbox.kairos.SchedulerPluginCreator;
 import com.engineersbox.kairos.SliceU8;
+import com.engineersbox.kairos.WorkerGroupProviderBox;
+import com.engineersbox.kairos.conversion.IntoBox;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.OptionalUtils;
 import com.engineersbox.kairos.utils.SliceUtils;
 import com.google.common.base.Strings;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
+import org.apache.hadoop.hbase.executor.Scheduling;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 
@@ -59,6 +65,21 @@ public class MetaRWQueueRpcExecutor extends RWQueueRpcExecutor {
     return conf.getFloat(META_CALL_QUEUE_SCAN_SHARE_CONF_KEY, 0);
   }
 
+  public static SchedulerIDOrKairosResult newMetaRWQueue(final String name, final int port,
+    final int handlerCount, final Configuration conf, final IntoBox<WorkerGroupProviderBox> wgProvider,
+    final TransparentPointerScope ptrScope) {
+    try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+      final Creator creator = Creator.newInstance(name, port, handlerCount, conf, ptrScope);
+      return Kairos.createSchedulerInstance(Scheduling.KAIROS,
+        SliceUtils.fromString(name, tempScope),
+        ptrScope.attachTransparent(creator.intoDescriptor()),
+        tempScope.attachTransparent(wgProvider.intoBox()),
+        Kairos.newNoopLoggerDrain(),
+        OptionalUtils.noneSchedulerBootstrapFn()
+      );
+    }
+  }
+
   public static class Creator extends SchedulerPluginCreator {
 
     private final String name;
@@ -69,8 +90,8 @@ public class MetaRWQueueRpcExecutor extends RWQueueRpcExecutor {
     private final TransparentPointerScope runtimeScope;
 
     private Creator(final SliceU8 name, final int port, final int handlerCount,
-      final Configuration conf, final SliceU8 description, final TransparentPointerScope runtimeScope) {
-      super(name, description);
+      final Configuration conf, final TransparentPointerScope runtimeScope) {
+      super(name);
       this.name = SliceUtils.intoString(name);
       this.port = port;
       this.handlerCount = handlerCount;
@@ -86,7 +107,6 @@ public class MetaRWQueueRpcExecutor extends RWQueueRpcExecutor {
           port,
           handlerCount,
           conf,
-          SliceUtils.fromString("", tempScope),
           runtimeScope
         );
       }

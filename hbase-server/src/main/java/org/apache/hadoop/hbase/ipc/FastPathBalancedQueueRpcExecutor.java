@@ -21,6 +21,7 @@ import com.engineersbox.kairos.ArcVoid;
 import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.LoggerDrainBox;
 import com.engineersbox.kairos.OptionalGenericError;
+import com.engineersbox.kairos.OptionalWorkerGroupError;
 import com.engineersbox.kairos.SchedulerArgs;
 import com.engineersbox.kairos.SchedulerIDOrKairosResult;
 import com.engineersbox.kairos.SchedulerPluginArcBox;
@@ -29,6 +30,7 @@ import com.engineersbox.kairos.SchedulerPluginCreator;
 import com.engineersbox.kairos.SliceU8;
 import com.engineersbox.kairos.Operation;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.OptionalUtils;
 import com.engineersbox.kairos.utils.SliceUtils;
 import com.google.common.base.Strings;
 import org.apache.hadoop.conf.Configuration;
@@ -58,35 +60,55 @@ public class FastPathBalancedQueueRpcExecutor extends BalancedQueueRpcExecutor {
     final long operation_id) {
     final CallRunner callOperation = task.runnable().container().instance().instance().getPointer(
       CallRunner.class);
-    final OptionalGenericError result = super.pool.assignDirect(
+    final OptionalWorkerGroupError result = super.pool.assignDirect(
       super.workerGroupBox.container(),
       0,
       task.runnable(),
       task.context(),
       operation_id
     );
-    if (result.tag().intern() == Kairos.OptionalGenericErrorTag.None_GenericError) {
+    if (result.tag().intern() == Kairos.OptionalWorkerGroupErrorTag.None_WorkerGroupError) {
       return true;
-    } else if (result.some().intern() == Kairos.GenericError.GENERIC_ERROR_RETRY) {
+    } else if (result.some().intern() == Kairos.WorkerGroupError.WORKER_GROUP_ERROR_DIRECT_UNSUPPORTED) {
       super.submit(schedulerPluginContainer, task, operation_id);
     }
     return false;
   }
 
   public static SchedulerIDOrKairosResult newFastPathBalancedQueue(final String name, final int port,
-    final int handlerCount, final Configuration conf, final PriorityFunction priority,
+    final int handlerCount, final int maxQueueLength, final Configuration conf, final PriorityFunction priority,
     final Abortable abortable, final TransparentPointerScope ptrScope) {
     try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
       final FastPathRpcHandlerPool.Provider wgProvider = tempScope.attachTransparent(
-        new FastPathRpcHandlerPool.Provider(name, port, priority, conf, abortable,
-          ptrScope));
+        new FastPathRpcHandlerPool.Provider(name, port, maxQueueLength, priority, conf,
+          abortable, ptrScope));
       final Creator creator = Creator.newInstance(name, handlerCount, ptrScope);
-      return Kairos.runSchedulerInstance(
+      return Kairos.createSchedulerInstance(
         Scheduling.KAIROS,
         SliceUtils.fromString(name, tempScope),
         ptrScope.attachTransparent(creator.intoDescriptor()),
         tempScope.attachTransparent(wgProvider.intoBox()),
-        Kairos.newDummyLoggerDrain()
+        Kairos.newNoopLoggerDrain(),
+        OptionalUtils.noneSchedulerBootstrapFn()
+      );
+    }
+  }
+  public static SchedulerIDOrKairosResult newFastPathBalancedQueue(final String name, final int port,
+    final int handlerCount, final int maxQueueLength, final String queueType, final Configuration conf,
+    final PriorityFunction priority,
+    final Abortable abortable, final TransparentPointerScope ptrScope) {
+    try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+      final FastPathRpcHandlerPool.Provider wgProvider = tempScope.attachTransparent(
+        new FastPathRpcHandlerPool.Provider(name, port, maxQueueLength, queueType, priority, conf,
+          abortable, ptrScope));
+      final Creator creator = Creator.newInstance(name, handlerCount, ptrScope);
+      return Kairos.createSchedulerInstance(
+        Scheduling.KAIROS,
+        SliceUtils.fromString(name, tempScope),
+        ptrScope.attachTransparent(creator.intoDescriptor()),
+        tempScope.attachTransparent(wgProvider.intoBox()),
+        Kairos.newNoopLoggerDrain(),
+        OptionalUtils.noneSchedulerBootstrapFn()
       );
     }
   }
@@ -98,9 +120,8 @@ public class FastPathBalancedQueueRpcExecutor extends BalancedQueueRpcExecutor {
 
     private final TransparentPointerScope runtimeScope;
 
-    private Creator(final SliceU8 name, final int handlerCount, final SliceU8 description,
-      final TransparentPointerScope runtimeScope) {
-      super(name, description);
+    private Creator(final SliceU8 name, final int handlerCount, final TransparentPointerScope runtimeScope) {
+      super(name);
       this.name = SliceUtils.intoString(name);
       this.handlerCount = handlerCount;
       this.runtimeScope = runtimeScope;
@@ -112,7 +133,6 @@ public class FastPathBalancedQueueRpcExecutor extends BalancedQueueRpcExecutor {
         return new Creator(
           SliceUtils.fromString(Strings.nullToEmpty(name), tempScope),
           handlerCount,
-          SliceUtils.fromString("", tempScope),
           runtimeScope
         );
       }

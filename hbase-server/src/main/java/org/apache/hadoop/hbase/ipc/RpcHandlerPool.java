@@ -3,6 +3,10 @@ package org.apache.hadoop.hbase.ipc;
 import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.OptionalGenericError;
 import com.engineersbox.kairos.OperationRunnableBox;
+import com.engineersbox.kairos.OptionalSliceOperationID;
+import com.engineersbox.kairos.OptionalSliceWorkerID;
+import com.engineersbox.kairos.OptionalWorkerGroupError;
+import com.engineersbox.kairos.UsizeOrWorkerGroupError;
 import com.engineersbox.kairos.WorkerGroup;
 import com.engineersbox.kairos.WorkerGroupBox;
 import com.engineersbox.kairos.WorkerGroupContainer;
@@ -12,6 +16,7 @@ import com.engineersbox.kairos.WorkerGroupProviderContainer;
 import com.engineersbox.kairos.conversion.IntoBox;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
 import com.engineersbox.kairos.utils.OptionalUtils;
+import com.engineersbox.kairos.utils.SliceUtils;
 import com.google.common.base.Preconditions;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
@@ -48,6 +53,8 @@ public class RpcHandlerPool extends WorkerGroup {
   private static final Logger LOGGER = LoggerFactory.getLogger(RpcHandlerPool.class);
 
   protected static final int DEFAULT_CALL_QUEUE_SIZE_HARD_LIMIT = 250;
+  protected static final float DEFAULT_CALL_QUEUE_HANDLER_FACTOR = 0.1f;
+  protected static final int UNDEFINED_MAX_CALLQUEUE_LENGTH = -1;
   public static final String CALL_QUEUE_HANDLER_FACTOR_CONF_KEY =
     "hbase.ipc.server.callqueue.handler.factor";
 
@@ -91,16 +98,16 @@ public class RpcHandlerPool extends WorkerGroup {
   protected final LongAdder numGeneralCallsDropped = new LongAdder();
   protected final LongAdder numLifoModeSwitches = new LongAdder();
 
-  protected int numCallQueues;
-  protected List<BlockingQueue<CallRunner>> queues;
-  private Class<? extends BlockingQueue> queueClass;
-  private Object[] queueInitArgs;
+  protected final int numCallQueues;
+  protected final List<BlockingQueue<CallRunner>> queues;
+  private final Class<? extends BlockingQueue> queueClass;
+  private final Object[] queueInitArgs;
 
   protected volatile int currentQueueLimit;
 
   protected final AtomicInteger activeHandlerCount = new AtomicInteger(0);
-  private List<RpcHandler> handlers;
-  private int handlerCount;
+  private final List<RpcHandler> handlers;
+  private final int handlerCount;
   private final AtomicInteger failedHandlerCount = new AtomicInteger(0);
 
   protected QueueBalancer balancer;
@@ -119,12 +126,12 @@ public class RpcHandlerPool extends WorkerGroup {
 
   public RpcHandlerPool(final String name, final int handlerCount, final int maxQueueLength,
     final int port, final PriorityFunction priority, final Configuration conf, final Abortable abortable) {
-    this(name, handlerCount, conf.get(CALL_QUEUE_TYPE_CONF_KEY, CALL_QUEUE_TYPE_CONF_DEFAULT),
-      maxQueueLength, port, priority, conf, abortable);
+    this(name, handlerCount, maxQueueLength, conf.get(CALL_QUEUE_TYPE_CONF_KEY, CALL_QUEUE_TYPE_CONF_DEFAULT),
+      port, priority, conf, abortable);
   }
 
-  public RpcHandlerPool(final String name, final int handlerCount, final String callQueueType,
-    final int maxQueueLength, final int port, final PriorityFunction priority, final Configuration conf,
+  public RpcHandlerPool(final String name, final int handlerCount, final int maxQueueLength,
+    final String callQueueType, final int port, final PriorityFunction priority, final Configuration conf,
     final Abortable abortable) {
     this.name = name;
     this.conf = conf;
@@ -132,27 +139,39 @@ public class RpcHandlerPool extends WorkerGroup {
     this.port = port;
     this.rawHandlerCount = handlerCount;
     this.callQueueType = callQueueType;
-    this.maxQueueLength = maxQueueLength;
     this.priority = priority;
     this.ptrScope = new TransparentPointerScope();
-  }
-
-  protected void initializeQueues(final int numQueues) {
-    if (queueInitArgs.length > 0) {
-      currentQueueLimit = (int) queueInitArgs[0];
-      queueInitArgs[0] = Math.max((int) queueInitArgs[0], DEFAULT_CALL_QUEUE_SIZE_HARD_LIMIT);
+    float callQueuesHandlersFactor = getCallQueueHandlerFactor(conf);
+    if (
+      Float.compare(callQueuesHandlersFactor, 1.0f) > 0
+        || Float.compare(0.0f, callQueuesHandlersFactor) > 0
+    ) {
+      LOGGER.warn(
+        CALL_QUEUE_HANDLER_FACTOR_CONF_KEY + " is *ILLEGAL*, it should be in range [0.0, 1.0]");
+      // For callQueuesHandlersFactor > 1.0, we just set it 1.0f.
+      if (Float.compare(callQueuesHandlersFactor, 1.0f) > 0) {
+        LOGGER.warn("Set " + CALL_QUEUE_HANDLER_FACTOR_CONF_KEY + " 1.0f");
+        callQueuesHandlersFactor = 1.0f;
+      } else {
+        // But for callQueuesHandlersFactor < 0.0, following method #computeNumCallQueues
+        // will compute max(1, -x) => 1 which has same effect of default value.
+        LOGGER.warn("Set " + CALL_QUEUE_HANDLER_FACTOR_CONF_KEY + " default value 0.0f");
+      }
     }
-    for (int i = 0; i < numQueues; ++i) {
-      queues.add(ReflectionUtils.newInstance(queueClass, queueInitArgs));
-    }
-  }
-
-  @Override
-  public OptionalGenericError start(final WorkerGroupContainer workerGroupContainer) {
-    this.numCallQueues = rawHandlerCount;
+    this.numCallQueues = computeNumCallQueues(handlerCount, callQueuesHandlersFactor);
     this.queues = new ArrayList<>(this.numCallQueues);
-    this.handlerCount = rawHandlerCount;
+
+    this.handlerCount = Math.max(handlerCount, this.numCallQueues);
     this.handlers = new ArrayList<>(this.handlerCount);
+
+    // If soft limit of queue is not provided, then calculate using
+    // DEFAULT_MAX_CALLQUEUE_LENGTH_PER_HANDLER
+    if (maxQueueLength == UNDEFINED_MAX_CALLQUEUE_LENGTH) {
+      int handlerCountPerQueue = this.handlerCount / this.numCallQueues;
+      this.maxQueueLength = handlerCountPerQueue * RpcServer.DEFAULT_MAX_CALLQUEUE_LENGTH_PER_HANDLER;
+    } else {
+      this.maxQueueLength = maxQueueLength;
+    }
     if (isDeadlineQueueType(callQueueType)) {
       this.name += ".Deadline";
       this.queueInitArgs =
@@ -190,13 +209,27 @@ public class RpcHandlerPool extends WorkerGroup {
       "Instantiated {} with queueClass={}; "
         + "numCallQueues={}, maxQueueLength={}, handlerCount={}",
       this.name, this.queueClass, this.numCallQueues, maxQueueLength, this.handlerCount);
-    startHandlers(port);
-    return OptionalUtils.noneGenericError();
+  }
+
+  protected void initializeQueues(final int numQueues) {
+    if (queueInitArgs.length > 0) {
+      currentQueueLimit = (int) queueInitArgs[0];
+      queueInitArgs[0] = Math.max((int) queueInitArgs[0], DEFAULT_CALL_QUEUE_SIZE_HARD_LIMIT);
+    }
+    for (int i = 0; i < numQueues; ++i) {
+      queues.add(ReflectionUtils.newInstance(queueClass, queueInitArgs));
+    }
   }
 
   @Override
-  public OptionalGenericError stop(final WorkerGroupContainer workerGroupContainer) {
-    return OptionalUtils.noneGenericError();
+  public OptionalWorkerGroupError start(final WorkerGroupContainer workerGroupContainer) {
+    startHandlers(port);
+    return OptionalUtils.noneWorkerGroupError();
+  }
+
+  @Override
+  public OptionalWorkerGroupError stop(final WorkerGroupContainer workerGroupContainer) {
+    return OptionalUtils.noneWorkerGroupError();
   }
 
   @Override
@@ -214,22 +247,19 @@ public class RpcHandlerPool extends WorkerGroup {
   }
 
   @Override
-  public OptionalGenericError assign(final WorkerGroupContainer container,
+  public OptionalWorkerGroupError assign(final WorkerGroupContainer container,
     final OperationRunnableBox taskRunnable, final Pointer ctx, final long operationID) {
     if (this.flushing.get()) {
       LOGGER.warn("Queue is flushing, dropping task for operation {}", operationID);
-      return OptionalUtils.some(
-        Kairos.GenericError.GENERIC_ERROR_FAILED,
-        this.ptrScope
-      );
+      return OptionalUtils.someWorkerGroupError(Kairos.WorkerGroupError.WORKER_GROUP_ERROR_FAILED);
     }
     final CallRunner callRunner = (CallRunner) taskRunnable.container().instance().instance();
     final int queueIndex = this.balancer.getNextQueue(callRunner);
     final Queue<CallRunner> queue = this.queues.get(queueIndex);
     if (queue.size() >= this.currentQueueLimit || !queue.offer(callRunner)) {
-      return OptionalUtils.some(Kairos.GenericError.GENERIC_ERROR_FAILED, this.ptrScope);
+      return OptionalUtils.someWorkerGroupError(Kairos.WorkerGroupError.WORKER_GROUP_ERROR_FAILED);
     }
-    return OptionalUtils.noneGenericError();
+    return OptionalUtils.noneWorkerGroupError();
   }
 
   private void resize(final int newSize) {
@@ -237,15 +267,50 @@ public class RpcHandlerPool extends WorkerGroup {
   }
 
   @Override
-  public OptionalGenericError resize(final WorkerGroupContainer workerGroupContainer,
+  public OptionalWorkerGroupError resize(final WorkerGroupContainer workerGroupContainer,
     final long newSize) {
     resize((int) newSize);
-    return OptionalUtils.noneGenericError();
+    return OptionalUtils.noneWorkerGroupError();
   }
 
   @Override
   public long size(final WorkerGroupContainer workerGroupContainer) {
     return this.handlerCount;
+  }
+
+  @Override
+  public OptionalSliceWorkerID workerIDs(final WorkerGroupContainer workerGroupContainer) {
+    final long[] workerIDs = new long[this.handlers.size()];
+    for (int i = 0; i < this.handlers.size(); i++) {
+      workerIDs[i] = this.handlers.get(0).getId();
+    }
+    return OptionalUtils.someSliceWorkerID(
+      SliceUtils.fromWorkerIDArray(workerIDs, this.ptrScope),
+      this.ptrScope
+    );
+  }
+
+  @Override
+  public OptionalWorkerGroupError assignDirect(final WorkerGroupContainer workerGroupContainer,
+    final long workerID, final OperationRunnableBox operationRunnableBox, final Pointer ctx,
+    final long operationID) {
+    return OptionalUtils.someWorkerGroupError(Kairos.WorkerGroupError.WORKER_GROUP_ERROR_DIRECT_UNSUPPORTED);
+  }
+
+  @Override public long operationCount(WorkerGroupContainer workerGroupContainer) {
+    return super.operationCount(workerGroupContainer);
+  }
+
+  @Override
+  public UsizeOrWorkerGroupError workerOperationCount(WorkerGroupContainer workerGroupContainer,
+    long l) {
+    return super.workerOperationCount(workerGroupContainer, l);
+  }
+
+  @Override
+  public OptionalSliceOperationID workerOperationIds(WorkerGroupContainer workerGroupContainer,
+    long l) {
+    return super.workerOperationIds(workerGroupContainer, l);
   }
 
   public void start(final int port) {
@@ -369,6 +434,10 @@ public class RpcHandlerPool extends WorkerGroup {
     return callQueueType.equals(CALL_QUEUE_TYPE_PLUGGABLE_CONF_VALUE);
   }
 
+  protected float getCallQueueHandlerFactor(Configuration conf) {
+    return conf.getFloat(CALL_QUEUE_HANDLER_FACTOR_CONF_KEY, DEFAULT_CALL_QUEUE_HANDLER_FACTOR);
+  }
+
   public static boolean isPluggableQueueWithFastPath(String callQueueType, Configuration conf) {
     return isPluggableQueueType(callQueueType)
       && conf.getBoolean(PLUGGABLE_CALL_QUEUE_WITH_FAST_PATH_ENABLED, false);
@@ -481,15 +550,17 @@ public class RpcHandlerPool extends WorkerGroup {
 
     private final String name;
     private final int port;
+    private final int maxQueueLength;
     private final PriorityFunction priority;
     private final Configuration conf;
     private final Abortable abortable;
     private final TransparentPointerScope ptrScope;
 
-    public Provider(final String name, final int port, final PriorityFunction priority,
+    public Provider(final String name, final int port, final int maxQueueLength, final PriorityFunction priority,
       final Configuration conf, final Abortable abortable, final TransparentPointerScope ptrScope) {
       this.name = name;
       this.port = port;
+      this.maxQueueLength = maxQueueLength;
       this.priority = priority;
       this.conf = conf;
       this.abortable = abortable;
@@ -502,7 +573,7 @@ public class RpcHandlerPool extends WorkerGroup {
       final RpcHandlerPool pool = ptrScope.attachTransparent(new RpcHandlerPool(
         this.name,
         (int) size,
-        (int) size,
+        this.maxQueueLength,
         this.port,
         this.priority,
         this.conf,

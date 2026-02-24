@@ -344,7 +344,7 @@ public class ExecutorService {
             publisher
           );
           if (result == Kairos.GenericError.GENERIC_ERROR_FAILED.value) {
-            return OptionalUtils.some(Kairos.GenericError.GENERIC_ERROR_FAILED, scope);
+            return OptionalUtils.someGenericError(Kairos.GenericError.GENERIC_ERROR_FAILED, scope);
           }
           publishers.put(
             Executor.this.name + "_" + DATA_BROKER_NAME,
@@ -376,7 +376,7 @@ public class ExecutorService {
         schedulerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
         schedulerDylib.name(SliceUtils.fromString(schedulerLibName, tempScope));
         final Kairos.KairosResult result =
-          Kairos.runSchedulerDylib(Scheduling.KAIROS, schedulerDylib, this.scope.attachTransparent(
+          Kairos.createSchedulerDylib(Scheduling.KAIROS, schedulerDylib, this.scope.attachTransparent(
               new TrackingThreadPoolProvider(this.scope, this.threadPoolExecutor).intoBox()),
             this.scope.attachTransparent(new SLF4JLoggerDrain(this.toString()).intoBox())).intern();
         if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {

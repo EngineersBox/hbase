@@ -23,9 +23,28 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import com.engineersbox.kairos.ArcVoid;
+import com.engineersbox.kairos.Kairos;
+import com.engineersbox.kairos.LoggerDrainBox;
+import com.engineersbox.kairos.Operation;
+import com.engineersbox.kairos.OptionalGenericError;
+import com.engineersbox.kairos.SchedulerArgs;
+import com.engineersbox.kairos.SchedulerIDOrKairosResult;
+import com.engineersbox.kairos.SchedulerPluginArcBox;
+import com.engineersbox.kairos.SchedulerPluginContainer;
+import com.engineersbox.kairos.SchedulerPluginCreator;
+import com.engineersbox.kairos.SliceU8;
+import com.engineersbox.kairos.WorkerGroupProviderBox;
+import com.engineersbox.kairos.conversion.IntoBox;
+import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.OptionalUtils;
+import com.engineersbox.kairos.utils.SliceUtils;
+import com.google.common.base.Strings;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.executor.Scheduling;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.yetus.audience.InterfaceAudience;
+import org.bytedeco.javacpp.PointerScope;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,39 +58,27 @@ import org.apache.hbase.thirdparty.io.netty.util.internal.StringUtil;
 @InterfaceAudience.Private
 public class FifoRpcScheduler extends RpcScheduler {
   private static final Logger LOG = LoggerFactory.getLogger(FifoRpcScheduler.class);
+  protected final int port;
   protected final int handlerCount;
   protected final int maxQueueLength;
   protected final AtomicInteger queueSize = new AtomicInteger(0);
   protected ThreadPoolExecutor executor;
+  protected final TransparentPointerScope ptrScope;
 
-  public FifoRpcScheduler(final, Configuration conf, int handlerCount) {
-    super();
+  public FifoRpcScheduler(final SliceU8 name, final SchedulerArgs args, final LoggerDrainBox loggerDrain,
+    final ArcVoid pluginCtx, final TransparentPointerScope ptrScope, final Configuration conf,
+    final int handlerCount, final int port) {
+    super(name, args, loggerDrain, pluginCtx);
+    this.port = port;
     this.handlerCount = handlerCount;
     this.maxQueueLength = conf.getInt(RpcScheduler.IPC_SERVER_MAX_CALLQUEUE_LENGTH,
       handlerCount * RpcServer.DEFAULT_MAX_CALLQUEUE_LENGTH_PER_HANDLER);
+    this.ptrScope = ptrScope;
   }
 
   @Override
-  public void init(Context context) {
+  public void init(final Context context) {
     // no-op
-  }
-
-  @Override
-  public void start() {
-    LOG.info("Using {} as user call queue; handlerCount={}; maxQueueLength={}",
-      this.getClass().getSimpleName(), handlerCount, maxQueueLength);
-    this.executor = new ThreadPoolExecutor(handlerCount, handlerCount, 60, TimeUnit.SECONDS,
-      new ArrayBlockingQueue<>(maxQueueLength),
-      new ThreadFactoryBuilder().setNameFormat("FifoRpcScheduler.handler-pool-%d").setDaemon(true)
-        .setUncaughtExceptionHandler(Threads.LOGGING_EXCEPTION_HANDLER).build(),
-      new ThreadPoolExecutor.CallerRunsPolicy());
-  }
-
-  @Override
-  public void stop() {
-    if (this.executor != null) {
-      this.executor.shutdown();
-    }
   }
 
   private static class FifoCallRunner implements Runnable {
@@ -93,8 +100,39 @@ public class FifoRpcScheduler extends RpcScheduler {
   }
 
   @Override
-  public boolean dispatch(final CallRunner task) {
+  public int bindWorkers(SchedulerPluginContainer schedulerPluginContainer,
+    WorkerGroupProviderBox workerGroupProviderBox) {
+    return super.bindWorkers(schedulerPluginContainer, workerGroupProviderBox);
+  }
+
+  @Override
+  public OptionalGenericError deinit(SchedulerPluginContainer schedulerPluginContainer) {
+    return super.deinit(schedulerPluginContainer);
+  }
+
+  @Override
+  public boolean submit(final SchedulerPluginContainer schedulerPluginContainer, final Operation operation,
+    final long operationID) {
+    final CallRunner task = operation.runnable().container().instance().instance().getPointer(CallRunner.class);
     return executeRpcCall(executor, queueSize, task);
+  }
+
+  @Override
+  public void stop(final SchedulerPluginContainer schedulerPluginContainer) {
+    if (this.executor != null) {
+      this.executor.shutdown();
+    }
+  }
+
+  @Override
+  public void start(final SchedulerPluginContainer schedulerPluginContainer) {
+    LOG.info("Using {} as user call queue; handlerCount={}; maxQueueLength={}",
+      this.getClass().getSimpleName(), handlerCount, maxQueueLength);
+    this.executor = new ThreadPoolExecutor(handlerCount, handlerCount, 60, TimeUnit.SECONDS,
+      new ArrayBlockingQueue<>(maxQueueLength),
+      new ThreadFactoryBuilder().setNameFormat("FifoRpcScheduler.handler-pool-%d").setDaemon(true)
+        .setUncaughtExceptionHandler(Threads.LOGGING_EXCEPTION_HANDLER).build(),
+      new ThreadPoolExecutor.CallerRunsPolicy());
   }
 
   protected boolean executeRpcCall(final ThreadPoolExecutor executor, final AtomicInteger queueSize,
@@ -209,6 +247,11 @@ public class FifoRpcScheduler extends RpcScheduler {
   }
 
   @Override
+  public PointerScope getPointerScope() {
+    return this.ptrScope;
+  }
+
+  @Override
   public int getMetaPriorityQueueLength() {
     return 0;
   }
@@ -253,5 +296,69 @@ public class FifoRpcScheduler extends RpcScheduler {
       return call.getMethod().getName();
     }
     return null;
+  }
+
+  public static SchedulerIDOrKairosResult newFifoRpcScheduler(final String name, final int port,
+    final int handlerCount, final Configuration conf, final IntoBox<WorkerGroupProviderBox> wgProvider,
+    final TransparentPointerScope ptrScope) {
+    try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+      final Creator creator = Creator.newInstance(name, port, handlerCount, conf, ptrScope);
+      return Kairos.createSchedulerInstance(
+        Scheduling.KAIROS,
+        SliceUtils.fromString(name, tempScope),
+        ptrScope.attachTransparent(creator.intoDescriptor()),
+        tempScope.attachTransparent(wgProvider.intoBox()),
+        Kairos.newNoopLoggerDrain(), OptionalUtils.noneSchedulerBootstrapFn()
+      );
+    }
+  }
+
+  public static class Creator extends SchedulerPluginCreator {
+
+    private final SliceU8 name;
+    private final int port;
+    private final int handlerCount;
+    private final Configuration conf;
+    private final TransparentPointerScope runtimeScope;
+
+    public Creator(final SliceU8 name, final int port, final int handlerCount,
+      final Configuration conf, final TransparentPointerScope runtimeScope) {
+      super(name);
+      this.name = name;
+      this.port = port;
+      this.handlerCount = handlerCount;
+      this.conf = conf;
+      this.runtimeScope = runtimeScope;
+    }
+
+    public static Creator newInstance(final String name, final int port, final int handlerCount,
+      final Configuration conf, final TransparentPointerScope runtimeScope) {
+      try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+        return new Creator(
+          SliceUtils.fromString(Strings.nullToEmpty(name), tempScope),
+          port,
+          handlerCount,
+          conf,
+          runtimeScope
+        );
+      }
+    }
+
+    @Override
+    public int createSchedulerInstance(final SliceU8 sliceU8, final SchedulerArgs schedulerArgs,
+      final ArcVoid pluginCtx, final LoggerDrainBox loggerDrainBox, final SchedulerPluginArcBox schedulerPluginArcBox) {
+      final FifoRpcScheduler scheduler = this.runtimeScope.attachTransparent(new FifoRpcScheduler(
+        this.name,
+        schedulerArgs,
+        loggerDrainBox,
+        pluginCtx,
+        this.runtimeScope,
+        this.conf,
+        this.handlerCount,
+        this.port
+      ));
+      scheduler.saturateArcBox(schedulerPluginArcBox);
+      return Kairos.GenericError.GENERIC_ERROR_SUCCESS.value;
+    }
   }
 }

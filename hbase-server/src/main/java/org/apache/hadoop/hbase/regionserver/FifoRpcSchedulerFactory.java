@@ -36,7 +36,7 @@ public class FifoRpcSchedulerFactory implements RpcSchedulerFactory {
   public RpcScheduler create(Configuration conf, PriorityFunction priority, Abortable server) {
     int handlerCount = conf.getInt(HConstants.REGION_SERVER_HANDLER_COUNT,
       HConstants.DEFAULT_REGION_SERVER_HANDLER_COUNT);
-    return new FifoRpcScheduler(conf, handlerCount);
+    return FifoRpcScheduler.newFifoRpcScheduler(conf, handlerCount);
   }
 
   @Deprecated

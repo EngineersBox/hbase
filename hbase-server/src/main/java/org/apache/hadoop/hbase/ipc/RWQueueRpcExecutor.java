@@ -21,14 +21,11 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.ReentrantLock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 import com.engineersbox.kairos.ArcVoid;
 import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.LoggerDrainBox;
 import com.engineersbox.kairos.OptionalGenericError;
+import com.engineersbox.kairos.OptionalWorkerGroupError;
 import com.engineersbox.kairos.SchedulerArgs;
 import com.engineersbox.kairos.SchedulerIDOrKairosResult;
 import com.engineersbox.kairos.SchedulerPluginArcBox;
@@ -41,28 +38,16 @@ import com.engineersbox.kairos.WorkerGroupProviderBox;
 import com.engineersbox.kairos.WorkerGroupProviderVTable;
 import com.engineersbox.kairos.conversion.IntoBox;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.OptionalUtils;
 import com.engineersbox.kairos.utils.SliceUtils;
-import com.engineersbox.kairos.utils.OperationUtils;
 import com.google.common.base.Strings;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
-import org.apache.hadoop.hbase.conf.ConfigurationObserver;
 import org.apache.hadoop.hbase.executor.Scheduling;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import org.apache.hbase.thirdparty.com.google.protobuf.Message;
-
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.Action;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.MultiRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.MutateRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.RegionAction;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.ScanRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos.RequestHeader;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos;
 
 /**
  * RPC Executor that uses different queues for reads and writes. With the options to use different
@@ -222,35 +207,35 @@ public class RWQueueRpcExecutor extends RpcExecutor {
     final long operation_id) {
     final CallRunner callRunner = task.runnable().container().instance().instance().getPointer(CallRunner.class);
     if (callRunner.isWriteRequest()) {
-      final OptionalGenericError result = this.writeWorkerGroupBox.vtbl().assign().call(
+      final OptionalWorkerGroupError result = this.writeWorkerGroupBox.vtbl().assign().call(
         this.writeWorkerGroupBox.container(),
         task.runnable(),
         task.context(),
         operation_id
       );
-      if (result.tag().intern() == Kairos.OptionalGenericErrorTag.Some_GenericError) {
+      if (result.tag().intern() == Kairos.OptionalWorkerGroupErrorTag.Some_WorkerGroupError) {
         LOGGER.error("Failed to submit write task with operation ID {}", operation_id);
         return false;
       }
     } else if (shouldDispatchToScanQueue(callRunner)) {
-      final OptionalGenericError result = this.scanWorkerGroupBox.vtbl().assign().call(
+      final OptionalWorkerGroupError result = this.scanWorkerGroupBox.vtbl().assign().call(
         this.scanWorkerGroupBox.container(),
         task.runnable(),
         task.context(),
         operation_id
       );
-      if (result.tag().intern() == Kairos.OptionalGenericErrorTag.Some_GenericError) {
+      if (result.tag().intern() == Kairos.OptionalWorkerGroupErrorTag.Some_WorkerGroupError) {
         LOGGER.error("Failed to submit scan task with operation ID {}", operation_id);
         return false;
       }
     } else {
-      final OptionalGenericError result = this.readWorkerGroupBox.vtbl().assign().call(
+      final OptionalWorkerGroupError result = this.readWorkerGroupBox.vtbl().assign().call(
         this.readWorkerGroupBox.container(),
         task.runnable(),
         task.context(),
         operation_id
       );
-      if (result.tag().intern() == Kairos.OptionalGenericErrorTag.Some_GenericError) {
+      if (result.tag().intern() == Kairos.OptionalWorkerGroupErrorTag.Some_WorkerGroupError) {
         LOGGER.error("Failed to submit read task with operation ID {}", operation_id);
         return false;
       }
@@ -372,14 +357,14 @@ public class RWQueueRpcExecutor extends RpcExecutor {
   }
 
   @Override
-  public void resizeQueues(Configuration conf) {
+  public void resizeQueues(final Configuration conf) {
     this.writePool.resizeQueues(conf);
     this.readPool.resizeQueues(conf);
     this.scanPool.resizeQueues(conf);
   }
 
   @Override
-  public void onConfigurationChange(Configuration conf) {
+  public void onConfigurationChange(final Configuration conf) {
     this.writePool.onConfigurationChange(conf);
     this.readPool.onConfigurationChange(conf);
     this.scanPool.onConfigurationChange(conf);
@@ -390,12 +375,13 @@ public class RWQueueRpcExecutor extends RpcExecutor {
     final TransparentPointerScope ptrScope) {
     try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
       final Creator creator = Creator.newInstance(name, port, handlerCount, conf, ptrScope);
-      return Kairos.runSchedulerInstance(
+      return Kairos.createSchedulerInstance(
         Scheduling.KAIROS,
         SliceUtils.fromString(name, tempScope),
         ptrScope.attachTransparent(creator.intoDescriptor()),
         tempScope.attachTransparent(wgProvider.intoBox()),
-        Kairos.newDummyLoggerDrain()
+        Kairos.newNoopLoggerDrain(),
+        OptionalUtils.noneSchedulerBootstrapFn()
       );
     }
   }
@@ -410,8 +396,8 @@ public class RWQueueRpcExecutor extends RpcExecutor {
     private final TransparentPointerScope runtimeScope;
 
     private Creator(final SliceU8 name, final int port, final int handlerCount,
-      final Configuration conf, final SliceU8 description, final TransparentPointerScope runtimeScope) {
-      super(name, description);
+      final Configuration conf, final TransparentPointerScope runtimeScope) {
+      super(name);
       this.name = SliceUtils.intoString(name);
       this.port = port;
       this.handlerCount = handlerCount;
@@ -427,7 +413,6 @@ public class RWQueueRpcExecutor extends RpcExecutor {
           port,
           handlerCount,
           conf,
-          SliceUtils.fromString("", tempScope),
           runtimeScope
         );
       }

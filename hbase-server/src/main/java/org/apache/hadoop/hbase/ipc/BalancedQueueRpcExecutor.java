@@ -22,6 +22,7 @@ import com.engineersbox.kairos.ArcVoid;
 import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.LoggerDrainBox;
 import com.engineersbox.kairos.OptionalGenericError;
+import com.engineersbox.kairos.OptionalWorkerGroupError;
 import com.engineersbox.kairos.SchedulerArgs;
 import com.engineersbox.kairos.SchedulerIDOrKairosResult;
 import com.engineersbox.kairos.SchedulerPluginArcBox;
@@ -34,6 +35,7 @@ import com.engineersbox.kairos.WorkerGroupProviderBox;
 import com.engineersbox.kairos.WorkerGroupProviderVTable;
 import com.engineersbox.kairos.conversion.IntoBox;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.OptionalUtils;
 import com.engineersbox.kairos.utils.SliceUtils;
 import com.google.common.base.Strings;
 import org.apache.hadoop.conf.Configuration;
@@ -92,13 +94,13 @@ public class BalancedQueueRpcExecutor extends RpcExecutor {
   @Override
   public boolean submit(final SchedulerPluginContainer schedulerPluginContainer, final Operation task,
     final long operation_id) {
-    final OptionalGenericError result = this.workerGroupBox.vtbl().assign().call(
+    final OptionalWorkerGroupError result = this.workerGroupBox.vtbl().assign().call(
       this.workerGroupBox.container(),
       task.runnable(),
       task.context(),
       operation_id
     );
-    if (result.tag().intern() == Kairos.OptionalGenericErrorTag.Some_GenericError) {
+    if (result.tag().intern() == Kairos.OptionalWorkerGroupErrorTag.Some_WorkerGroupError) {
       LOGGER.error("Failed to submit write task with operation ID {}", operation_id);
       return false;
     }
@@ -149,11 +151,12 @@ public class BalancedQueueRpcExecutor extends RpcExecutor {
     final IntoBox<WorkerGroupProviderBox> wgProvider, final TransparentPointerScope ptrScope) {
     try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
       final Creator creator = Creator.newInstance(name, handlerCount, ptrScope);
-      return Kairos.runSchedulerInstance(Scheduling.KAIROS,
+      return Kairos.createSchedulerInstance(Scheduling.KAIROS,
         SliceUtils.fromString(name, tempScope),
         ptrScope.attachTransparent(creator.intoDescriptor()),
         tempScope.attachTransparent(wgProvider.intoBox()),
-        Kairos.newDummyLoggerDrain()
+        Kairos.newNoopLoggerDrain(),
+        OptionalUtils.noneSchedulerBootstrapFn()
       );
     }
   }
@@ -165,9 +168,8 @@ public class BalancedQueueRpcExecutor extends RpcExecutor {
 
     private final TransparentPointerScope runtimeScope;
 
-    private Creator(final SliceU8 name, final int handlerCount, final SliceU8 description,
-      final TransparentPointerScope runtimeScope) {
-      super(name, description);
+    private Creator(final SliceU8 name, final int handlerCount, final TransparentPointerScope runtimeScope) {
+      super(name);
       this.name = SliceUtils.intoString(name);
       this.handlerCount = handlerCount;
       this.runtimeScope = runtimeScope;
@@ -179,7 +181,6 @@ public class BalancedQueueRpcExecutor extends RpcExecutor {
         return new Creator(
           SliceUtils.fromString(Strings.nullToEmpty(name), tempScope),
           handlerCount,
-          SliceUtils.fromString("", tempScope),
           runtimeScope
         );
       }
