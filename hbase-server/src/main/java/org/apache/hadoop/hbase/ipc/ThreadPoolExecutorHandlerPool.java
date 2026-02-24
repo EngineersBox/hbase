@@ -7,7 +7,12 @@ import com.engineersbox.kairos.OptionalSliceWorkerID;
 import com.engineersbox.kairos.OptionalWorkerGroupError;
 import com.engineersbox.kairos.UsizeOrWorkerGroupError;
 import com.engineersbox.kairos.WorkerGroup;
+import com.engineersbox.kairos.WorkerGroupBox;
 import com.engineersbox.kairos.WorkerGroupContainer;
+import com.engineersbox.kairos.WorkerGroupProvider;
+import com.engineersbox.kairos.WorkerGroupProviderBox;
+import com.engineersbox.kairos.WorkerGroupProviderContainer;
+import com.engineersbox.kairos.conversion.IntoBox;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
 import com.engineersbox.kairos.utils.OperationUtils;
 import com.engineersbox.kairos.utils.OptionalUtils;
@@ -127,5 +132,30 @@ public class ThreadPoolExecutorHandlerPool extends WorkerGroup {
   public OptionalSliceOperationID workerOperationIds(
     WorkerGroupContainer workerGroupContainer, long l) {
     return OptionalUtils.noneSliceOperationID();
+  }
+
+  public static class Provider extends WorkerGroupProvider implements
+    IntoBox<WorkerGroupProviderBox> {
+
+    private final Configuration conf;
+    private final int handlerCount;
+    private final TransparentPointerScope ptrScope;
+
+    public Provider(final Configuration conf, final int handlerCount, final TransparentPointerScope ptrScope) {
+      this.conf = conf;
+      this.handlerCount = handlerCount;
+      this.ptrScope = ptrScope;
+    }
+
+    @Override
+    public Kairos.GenericError provide(final WorkerGroupProviderContainer workerGroupProviderContainer,
+      final long size, final WorkerGroupBox workerGroupBox) {
+      final ThreadPoolExecutorHandlerPool pool = ptrScope.attachTransparent(new ThreadPoolExecutorHandlerPool(
+        this.conf,
+        this.handlerCount
+      ));
+      pool.saturateBox(workerGroupBox);
+      return Kairos.GenericError.GENERIC_ERROR_SUCCESS;
+    }
   }
 }

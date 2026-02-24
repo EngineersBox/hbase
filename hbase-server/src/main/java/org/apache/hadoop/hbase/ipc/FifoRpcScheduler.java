@@ -28,6 +28,7 @@ import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.LoggerDrainBox;
 import com.engineersbox.kairos.Operation;
 import com.engineersbox.kairos.OptionalGenericError;
+import com.engineersbox.kairos.OptionalSchedulerBootstrapFn;
 import com.engineersbox.kairos.SchedulerArgs;
 import com.engineersbox.kairos.SchedulerIDOrKairosResult;
 import com.engineersbox.kairos.SchedulerPluginArcBox;
@@ -58,7 +59,6 @@ import org.apache.hbase.thirdparty.io.netty.util.internal.StringUtil;
 @InterfaceAudience.Private
 public class FifoRpcScheduler extends RpcScheduler {
   private static final Logger LOG = LoggerFactory.getLogger(FifoRpcScheduler.class);
-  protected final int port;
   protected final int handlerCount;
   protected final int maxQueueLength;
   protected final AtomicInteger queueSize = new AtomicInteger(0);
@@ -67,9 +67,8 @@ public class FifoRpcScheduler extends RpcScheduler {
 
   public FifoRpcScheduler(final SliceU8 name, final SchedulerArgs args, final LoggerDrainBox loggerDrain,
     final ArcVoid pluginCtx, final TransparentPointerScope ptrScope, final Configuration conf,
-    final int handlerCount, final int port) {
+    final int handlerCount) {
     super(name, args, loggerDrain, pluginCtx);
-    this.port = port;
     this.handlerCount = handlerCount;
     this.maxQueueLength = conf.getInt(RpcScheduler.IPC_SERVER_MAX_CALLQUEUE_LENGTH,
       handlerCount * RpcServer.DEFAULT_MAX_CALLQUEUE_LENGTH_PER_HANDLER);
@@ -298,17 +297,25 @@ public class FifoRpcScheduler extends RpcScheduler {
     return null;
   }
 
-  public static SchedulerIDOrKairosResult newFifoRpcScheduler(final String name, final int port,
-    final int handlerCount, final Configuration conf, final IntoBox<WorkerGroupProviderBox> wgProvider,
+  public static SchedulerIDOrKairosResult newFifoRpcScheduler(final String name, final int handlerCount,
+    final Configuration conf, final OptionalSchedulerBootstrapFn bootstrapFn,
     final TransparentPointerScope ptrScope) {
     try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
-      final Creator creator = Creator.newInstance(name, port, handlerCount, conf, ptrScope);
+      final Creator creator = Creator.newInstance(name, handlerCount, conf, ptrScope);
+      final ThreadPoolExecutorHandlerPool.Provider wgProvider = tempScope.attachTransparent(
+        new ThreadPoolExecutorHandlerPool.Provider(
+          conf,
+          handlerCount,
+          ptrScope
+        )
+      );
       return Kairos.createSchedulerInstance(
         Scheduling.KAIROS,
         SliceUtils.fromString(name, tempScope),
         ptrScope.attachTransparent(creator.intoDescriptor()),
         tempScope.attachTransparent(wgProvider.intoBox()),
-        Kairos.newNoopLoggerDrain(), OptionalUtils.noneSchedulerBootstrapFn()
+        Kairos.newNoopLoggerDrain(),
+        bootstrapFn
       );
     }
   }
@@ -316,27 +323,24 @@ public class FifoRpcScheduler extends RpcScheduler {
   public static class Creator extends SchedulerPluginCreator {
 
     private final SliceU8 name;
-    private final int port;
     private final int handlerCount;
     private final Configuration conf;
     private final TransparentPointerScope runtimeScope;
 
-    public Creator(final SliceU8 name, final int port, final int handlerCount,
+    public Creator(final SliceU8 name, final int handlerCount,
       final Configuration conf, final TransparentPointerScope runtimeScope) {
       super(name);
       this.name = name;
-      this.port = port;
       this.handlerCount = handlerCount;
       this.conf = conf;
       this.runtimeScope = runtimeScope;
     }
 
-    public static Creator newInstance(final String name, final int port, final int handlerCount,
-      final Configuration conf, final TransparentPointerScope runtimeScope) {
+    public static Creator newInstance(final String name, final int handlerCount, final Configuration conf,
+      final TransparentPointerScope runtimeScope) {
       try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
         return new Creator(
           SliceUtils.fromString(Strings.nullToEmpty(name), tempScope),
-          port,
           handlerCount,
           conf,
           runtimeScope
@@ -354,8 +358,7 @@ public class FifoRpcScheduler extends RpcScheduler {
         pluginCtx,
         this.runtimeScope,
         this.conf,
-        this.handlerCount,
-        this.port
+        this.handlerCount
       ));
       scheduler.saturateArcBox(schedulerPluginArcBox);
       return Kairos.GenericError.GENERIC_ERROR_SUCCESS.value;

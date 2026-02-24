@@ -20,6 +20,7 @@ package org.apache.hadoop.hbase.ipc;
 import com.engineersbox.kairos.ArcVoid;
 import com.engineersbox.kairos.Kairos;
 import com.engineersbox.kairos.LoggerDrainBox;
+import com.engineersbox.kairos.OptionalSchedulerBootstrapFn;
 import com.engineersbox.kairos.SchedulerArgs;
 import com.engineersbox.kairos.SchedulerIDOrKairosResult;
 import com.engineersbox.kairos.SchedulerPluginArcBox;
@@ -28,6 +29,8 @@ import com.engineersbox.kairos.SchedulerPluginCreator;
 import com.engineersbox.kairos.SliceU8;
 import com.engineersbox.kairos.Operation;
 import com.engineersbox.kairos.OperationMetadataOrKairosResult;
+import com.engineersbox.kairos.WorkerGroupProviderBox;
+import com.engineersbox.kairos.conversion.IntoBox;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
 import com.engineersbox.kairos.utils.SliceUtils;
 import com.google.common.base.Strings;
@@ -524,9 +527,37 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
     return callQueueInfo;
   }
 
+  public static SchedulerIDOrKairosResult newSimpleRpcScheduler(final String name, final int handlerCount,
+    final int priorityHandlerCount, final int replicationHandlerCount, final int metaTransitionHandlerCount,
+    final PriorityFunction priority, final Abortable server, final int highPriorityLevel,
+    final Configuration conf, final IntoBox<WorkerGroupProviderBox> wgProvider,
+    final OptionalSchedulerBootstrapFn bootstrapFn, final TransparentPointerScope ptrScope) {
+      try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+        final Creator creator = Creator.newInstance(
+          name,
+          handlerCount,
+          priorityHandlerCount,
+          replicationHandlerCount,
+          metaTransitionHandlerCount,
+          priority,
+          server,
+          highPriorityLevel,
+          conf,
+          ptrScope
+        );
+        return Kairos.createSchedulerInstance(
+          Scheduling.KAIROS,
+          SliceUtils.fromString(name, tempScope),
+          ptrScope.attachTransparent(creator.intoDescriptor()),
+          tempScope.attachTransparent(wgProvider.intoBox()),
+          Kairos.newNoopLoggerDrain(),
+          bootstrapFn
+        );
+      }
+    }
+
   public static class Creator extends SchedulerPluginCreator {
 
-    private final Context context;
     private final int handlerCount;
     private final int priorityHandlerCount;
     private final int replicationHandlerCount;
@@ -538,11 +569,10 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
 
     private final TransparentPointerScope runtimeScope;
 
-    public Creator(final SliceU8 name, final Context context, final int handlerCount, final int priorityHandlerCount,
+    public Creator(final SliceU8 name, final int handlerCount, final int priorityHandlerCount,
       final int replicationHandlerCount, final int metaTransitionHandler, final PriorityFunction priority,
       Abortable server, int highPriorityLevel, final Configuration conf, final TransparentPointerScope runtimeScope) {
       super(name);
-      this.context = context;
       this.handlerCount = handlerCount;
       this.priorityHandlerCount = priorityHandlerCount;
       this.replicationHandlerCount = replicationHandlerCount;
@@ -554,14 +584,13 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
       this.runtimeScope = runtimeScope;
     }
 
-    public static Creator newInstance(final String name, final Context context, final int handlerCount,
+    public static Creator newInstance(final String name, final int handlerCount,
       final int priorityHandlerCount, final int replicationHandlerCount, final int metaTransitionHandler,
       final PriorityFunction priority, final Abortable server, final int highPriorityLevel,
       final Configuration conf, final TransparentPointerScope runtimeScope) {
       try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
         return new Creator(
           SliceUtils.fromString(Strings.nullToEmpty(name), tempScope),
-          context,
           handlerCount,
           priorityHandlerCount,
           replicationHandlerCount,
@@ -594,7 +623,6 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
         loggerDrainBox,
         pluginCtx
       ));
-      scheduler.init(this.context);
       scheduler.saturateArcBox(schedulerPlugin);
       return 0;
     }

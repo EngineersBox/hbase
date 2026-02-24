@@ -85,7 +85,7 @@ public interface RpcServerInterface {
    */
   void refreshAuthManager(Configuration conf, PolicyProvider pp);
 
-  RpcScheduler getScheduler();
+  long getSchedulerID();
 
   /**
    * Allocator to allocate/free the ByteBuffers, those ByteBuffers can be on-heap or off-heap.

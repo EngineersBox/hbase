@@ -40,6 +40,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
+import com.engineersbox.kairos.Kairos;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
@@ -428,7 +429,7 @@ public class SimpleRpcServer extends RpcServer {
     HBasePolicyProvider.init(conf, authManager);
     responder.start();
     listener.start();
-    scheduler.start();
+    Kairos.schedulerplugin_start(this.scheduler);
     started = true;
   }
 
@@ -444,7 +445,7 @@ public class SimpleRpcServer extends RpcServer {
     listener.interrupt();
     listener.doStop();
     responder.interrupt();
-    scheduler.stop();
+    Kairos.schedulerplugin_stop(this.scheduler);
     notifyAll();
   }
 

@@ -17,11 +17,14 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
+import com.engineersbox.kairos.WorkerGroupProviderBox;
+import com.engineersbox.kairos.conversion.IntoBox;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.ipc.PriorityFunction;
 import org.apache.hadoop.hbase.ipc.RpcScheduler;
+import org.apache.hadoop.hbase.ipc.RpcSchedulerProvider;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 
@@ -34,12 +37,6 @@ public interface RpcSchedulerFactory {
   /**
    * Constructs a {@link org.apache.hadoop.hbase.ipc.RpcScheduler}.
    */
-  RpcScheduler create(Configuration conf, PriorityFunction priority, Abortable server);
-
-  /**
-   * @deprecated since 1.0.0.
-   * @see <a href="https://issues.apache.org/jira/browse/HBASE-12028">HBASE-12028</a>
-   */
-  @Deprecated
-  RpcScheduler create(Configuration conf, PriorityFunction priority);
+  RpcSchedulerProvider create(final String name, final Configuration conf, final PriorityFunction priority,
+    final Abortable server);
 }

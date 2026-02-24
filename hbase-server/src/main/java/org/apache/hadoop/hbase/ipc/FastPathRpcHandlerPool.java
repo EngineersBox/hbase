@@ -51,7 +51,7 @@ public class FastPathRpcHandlerPool extends RpcHandlerPool {
     final long operation_id) {
     final FastPathRpcHandler handler = handlerStack.poll();
     if (handler == null) {
-      return OptionalUtils.someWorkerGroupError(Kairos.WorkerGroupError.WORKER_GROUP_ERROR_FAILED);
+      return OptionalUtils.someWorkerGroupError(Kairos.WorkerGroupError.WORKER_GROUP_ERROR_DIRECT_UNSUPPORTED);
     }
     final CallRunner callRunner = taskRunnableBox.container().instance().instance().getPointer(
       CallRunner.class);

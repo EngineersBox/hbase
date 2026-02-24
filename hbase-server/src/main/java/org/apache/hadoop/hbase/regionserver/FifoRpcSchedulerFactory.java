@@ -17,12 +17,19 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
+import com.engineersbox.kairos.OptionalSchedulerBootstrapFn;
+import com.engineersbox.kairos.SchedulerIDOrKairosResult;
+import com.engineersbox.kairos.WorkerGroupProviderBox;
+import com.engineersbox.kairos.conversion.IntoBox;
+import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.workers.NoOpWorkerGroupProvider;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.ipc.FifoRpcScheduler;
 import org.apache.hadoop.hbase.ipc.PriorityFunction;
 import org.apache.hadoop.hbase.ipc.RpcScheduler;
+import org.apache.hadoop.hbase.ipc.RpcSchedulerProvider;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 
@@ -33,15 +40,19 @@ import org.apache.yetus.audience.InterfaceStability;
 @InterfaceStability.Evolving
 public class FifoRpcSchedulerFactory implements RpcSchedulerFactory {
   @Override
-  public RpcScheduler create(Configuration conf, PriorityFunction priority, Abortable server) {
-    int handlerCount = conf.getInt(HConstants.REGION_SERVER_HANDLER_COUNT,
-      HConstants.DEFAULT_REGION_SERVER_HANDLER_COUNT);
-    return FifoRpcScheduler.newFifoRpcScheduler(conf, handlerCount);
-  }
-
-  @Deprecated
-  @Override
-  public RpcScheduler create(Configuration conf, PriorityFunction priority) {
-    return create(conf, priority, null);
+  public RpcSchedulerProvider create(final String name, final Configuration conf, final PriorityFunction priority, final Abortable server) {
+    return new RpcSchedulerProvider(true, true) {
+      @Override
+      public SchedulerIDOrKairosResult createScheduler(final OptionalSchedulerBootstrapFn optionalSchedulerBootstrapFn) {
+        final int handlerCount = conf.getInt(HConstants.REGION_SERVER_HANDLER_COUNT,
+          HConstants.DEFAULT_REGION_SERVER_HANDLER_COUNT);
+        try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+          return FifoRpcScheduler.newFifoRpcScheduler(name, handlerCount, conf,
+            tempScope.attachTransparent(new NoOpWorkerGroupProvider()),
+            optionalSchedulerBootstrapFn,
+            new TransparentPointerScope());
+        }
+      }
+    };
   }
 }

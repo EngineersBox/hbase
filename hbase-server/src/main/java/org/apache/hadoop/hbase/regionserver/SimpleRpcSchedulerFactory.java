@@ -17,12 +17,19 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
+import com.engineersbox.kairos.OptionalSchedulerBootstrapFn;
+import com.engineersbox.kairos.SchedulerIDOrKairosResult;
+import com.engineersbox.kairos.WorkerGroupProviderBox;
+import com.engineersbox.kairos.conversion.IntoBox;
+import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.workers.NoOpWorkerGroupProvider;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.ipc.PriorityFunction;
 import org.apache.hadoop.hbase.ipc.RpcScheduler;
+import org.apache.hadoop.hbase.ipc.RpcSchedulerProvider;
 import org.apache.hadoop.hbase.ipc.SimpleRpcScheduler;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
@@ -33,27 +40,28 @@ import org.apache.yetus.audience.InterfaceStability;
 @InterfaceAudience.LimitedPrivate({ HBaseInterfaceAudience.COPROC, HBaseInterfaceAudience.PHOENIX })
 @InterfaceStability.Evolving
 public class SimpleRpcSchedulerFactory implements RpcSchedulerFactory {
-  /**
-   * @deprecated since 1.0.0.
-   * @see <a href="https://issues.apache.org/jira/browse/HBASE-12028">HBASE-12028</a>
-   */
-  @Override
-  @Deprecated
-  public RpcScheduler create(Configuration conf, PriorityFunction priority) {
-    return create(conf, priority, null);
-  }
 
   @Override
-  public RpcScheduler create(Configuration conf, PriorityFunction priority, Abortable server) {
+  public RpcSchedulerProvider create(final String name, final Configuration conf,
+    final PriorityFunction priority, final Abortable server) {
     int handlerCount = conf.getInt(HConstants.REGION_SERVER_HANDLER_COUNT,
       HConstants.DEFAULT_REGION_SERVER_HANDLER_COUNT);
-    return new SimpleRpcScheduler(conf, handlerCount,
-      conf.getInt(HConstants.REGION_SERVER_HIGH_PRIORITY_HANDLER_COUNT,
-        HConstants.DEFAULT_REGION_SERVER_HIGH_PRIORITY_HANDLER_COUNT),
-      conf.getInt(HConstants.REGION_SERVER_REPLICATION_HANDLER_COUNT,
-        HConstants.DEFAULT_REGION_SERVER_REPLICATION_HANDLER_COUNT),
-      conf.getInt(HConstants.MASTER_META_TRANSITION_HANDLER_COUNT,
-        HConstants.MASTER__META_TRANSITION_HANDLER_COUNT_DEFAULT),
-      priority, server, HConstants.QOS_THRESHOLD);
+    return new RpcSchedulerProvider(true, true) {
+      @Override public SchedulerIDOrKairosResult createScheduler(
+        OptionalSchedulerBootstrapFn optionalSchedulerBootstrapFn) {
+        try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+          return SimpleRpcScheduler.newSimpleRpcScheduler(name, handlerCount,
+            conf.getInt(HConstants.REGION_SERVER_HIGH_PRIORITY_HANDLER_COUNT,
+              HConstants.DEFAULT_REGION_SERVER_HIGH_PRIORITY_HANDLER_COUNT),
+            conf.getInt(HConstants.REGION_SERVER_REPLICATION_HANDLER_COUNT,
+              HConstants.DEFAULT_REGION_SERVER_REPLICATION_HANDLER_COUNT),
+            conf.getInt(HConstants.MASTER_META_TRANSITION_HANDLER_COUNT,
+              HConstants.MASTER__META_TRANSITION_HANDLER_COUNT_DEFAULT), priority, server,
+            HConstants.QOS_THRESHOLD, conf,
+            tempScope.attachTransparent(new NoOpWorkerGroupProvider()), optionalSchedulerBootstrapFn,
+            new TransparentPointerScope());
+        }
+      }
+    };
   }
 }

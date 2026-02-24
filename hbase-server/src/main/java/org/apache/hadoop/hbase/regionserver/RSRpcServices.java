@@ -17,6 +17,8 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
+import com.engineersbox.kairos.WorkerGroupProviderBox;
+import com.engineersbox.kairos.conversion.IntoBox;
 import com.google.errorprone.annotations.RestrictedApi;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -1257,6 +1259,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
   public RSRpcServices(final HRegionServer rs) throws IOException {
     final Configuration conf = rs.getConfiguration();
     regionServer = rs;
+    // NOTE: Customise this to change the scheduler implementation
     final RpcSchedulerFactory rpcSchedulerFactory;
     try {
       rpcSchedulerFactory = getRpcSchedulerFactoryClass().asSubclass(RpcSchedulerFactory.class)
@@ -1318,6 +1321,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
       .expireAfterAccess(scannerLeaseTimeoutPeriod, TimeUnit.MILLISECONDS).build();
   }
 
+
   protected RpcServerInterface createRpcServer(final Server server,
     final RpcSchedulerFactory rpcSchedulerFactory, final InetSocketAddress bindAddress,
     final String name) throws IOException {
@@ -1328,7 +1332,9 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
                                                                                         // bindAddress
                                                                                         // for this
                                                                                         // server.
-        conf, rpcSchedulerFactory.create(conf, this, server), reservoirEnabled);
+        conf, rpcSchedulerFactory.create(name, conf, this, server),
+        reservoirEnabled
+      );
     } catch (BindException be) {
       throw new IOException(be.getMessage() + ". To switch ports use the '"
         + HConstants.REGIONSERVER_PORT + "' configuration property.",
@@ -4159,9 +4165,9 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
     return responseBuilder.addAllCachedFiles(fullyCachedFiles).build();
   }
 
-  public RpcScheduler getRpcScheduler() {
-    return rpcServer.getScheduler();
-  }
+//  public RpcScheduler getRpcScheduler() {
+//    return rpcServer.getScheduler();
+//  }
 
   protected AccessChecker getAccessChecker() {
     return accessChecker;

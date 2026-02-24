@@ -28,10 +28,12 @@ import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
@@ -212,7 +214,9 @@ public abstract class RpcServer implements RpcServerInterface, ConfigurationObse
   protected final Server server;
   protected final List<BlockingServiceAndInterface> services;
 
-  protected final RpcScheduler scheduler;
+//  protected RpcScheduler scheduler = null;
+  protected long schedulerID = 0;
+  protected Set<ConfigurationObserver> registeredObservers;
 
   protected final UserProvider userProvider;
 
@@ -273,7 +277,7 @@ public abstract class RpcServer implements RpcServerInterface, ConfigurationObse
    */
   public RpcServer(final Server server, final String name,
     final List<BlockingServiceAndInterface> services, final InetSocketAddress bindAddress,
-    Configuration conf, RpcScheduler scheduler, boolean reservoirEnabled) throws IOException {
+    Configuration conf, boolean reservoirEnabled) throws IOException {
     this.bbAllocator = ByteBuffAllocator.create(conf, reservoirEnabled);
     this.server = server;
     this.services = services;
@@ -309,17 +313,15 @@ public abstract class RpcServer implements RpcServerInterface, ConfigurationObse
       saslProps = Collections.emptyMap();
       serverPrincipal = HConstants.EMPTY_STRING;
     }
-
+    this.registeredObservers = new HashSet<>();
     this.isOnlineLogProviderEnabled = getIsOnlineLogProviderEnabled(conf);
-    this.scheduler = scheduler;
   }
 
   @Override
   public void onConfigurationChange(Configuration newConf) {
     initReconfigurable(newConf);
-    if (scheduler instanceof ConfigurationObserver) {
-      ((ConfigurationObserver) scheduler).onConfigurationChange(newConf);
-    }
+    this.registeredObservers.forEach((final ConfigurationObserver observer) ->
+      observer.onConfigurationChange(newConf));
     if (authorize) {
       refreshAuthManager(newConf, new HBasePolicyProvider());
     }
@@ -857,8 +859,8 @@ public abstract class RpcServer implements RpcServerInterface, ConfigurationObse
   }
 
   @Override
-  public RpcScheduler getScheduler() {
-    return scheduler;
+  public long getSchedulerID() {
+    return schedulerID;
   }
 
   @Override

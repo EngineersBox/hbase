@@ -32,11 +32,21 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.net.ssl.SSLPeerUnverifiedException;
+import com.engineersbox.kairos.Kairos;
+import com.engineersbox.kairos.OptionalGenericError;
+import com.engineersbox.kairos.SchedulerBootstrapCallback;
+import com.engineersbox.kairos.SchedulerBootstrapFn;
+import com.engineersbox.kairos.SchedulerIDOrKairosResult;
+import com.engineersbox.kairos.SchedulerPluginArcBox;
+import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.OptionalUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.Server;
+import org.apache.hadoop.hbase.conf.ConfigurationObserver;
 import org.apache.hadoop.hbase.exceptions.X509Exception;
+import org.apache.hadoop.hbase.executor.Scheduling;
 import org.apache.hadoop.hbase.io.FileChangeWatcher;
 import org.apache.hadoop.hbase.io.crypto.tls.X509Util;
 import org.apache.hadoop.hbase.monitoring.MonitoredRPCHandler;
@@ -49,6 +59,7 @@ import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.ReflectionUtils;
 import org.apache.hadoop.security.authorize.ServiceAuthorizationManager;
 import org.apache.yetus.audience.InterfaceAudience;
+import org.bytedeco.javacpp.Pointer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -142,9 +153,16 @@ public class NettyRpcServer extends RpcServer {
   private volatile WriteBufferWaterMark writeBufferWaterMark;
 
   public NettyRpcServer(Server server, String name, List<BlockingServiceAndInterface> services,
-    InetSocketAddress bindAddress, Configuration conf, RpcScheduler scheduler,
+    InetSocketAddress bindAddress, Configuration conf, RpcSchedulerProvider schedulerProvider,
     boolean reservoirEnabled) throws IOException {
-    super(server, name, services, bindAddress, conf, scheduler, reservoirEnabled);
+    super(
+      server,
+      name,
+      services,
+      bindAddress,
+      conf,
+      reservoirEnabled
+    );
     this.bindAddress = bindAddress;
     this.channelAllocator = getChannelAllocator(conf);
     // Get the event loop group configuration from the server class if available.
@@ -199,7 +217,31 @@ public class NettyRpcServer extends RpcServer {
       throw new InterruptedIOException(e.getMessage());
     }
     initReconfigurable(conf);
-    this.scheduler.init(new RpcSchedulerContext(this));
+    try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
+      final SchedulerIDOrKairosResult result = tempScope.attachTransparent(schedulerProvider.withBootstrapFn(OptionalUtils.someSchedulerBootstrapFn(
+        tempScope.attachTransparent(tempScope.attachTransparent(new SchedulerBootstrapCallback(null) {
+          @Override
+          public OptionalGenericError bootstrap(final SchedulerPluginArcBox schedulerPluginArcBox,
+            final Pointer ctx) {
+            if (!schedulerProvider.isInstanceScheduler) {
+              return OptionalUtils.noneGenericError();
+            }
+            final RpcScheduler scheduler = schedulerPluginArcBox.container().instance().instance().getPointer(RpcScheduler.class);
+            scheduler.init(new RpcSchedulerContext(NettyRpcServer.this));
+            if (schedulerProvider.shouldRegisterConfigurationObserver
+              && scheduler instanceof ConfigurationObserver) {
+              NettyRpcServer.this.registeredObservers.add((ConfigurationObserver) scheduler);
+            }
+            return OptionalUtils.noneGenericError();
+          }
+        }).intoBootstrapCallback()),
+        tempScope
+      )).provide());
+      if (result.tag().intern() == Kairos.SchedulerIDOrKairosResultTag.Err_SchedulerID__KairosResult) {
+        throw new RuntimeException("Failed to create scheduler: " + result.err().name());
+      }
+      this.schedulerID = result.ok();
+    }
   }
 
   @Override
@@ -339,7 +381,7 @@ public class NettyRpcServer extends RpcServer {
     }
     this.authManager = new ServiceAuthorizationManager();
     HBasePolicyProvider.init(conf, authManager);
-    scheduler.start();
+    Kairos.startScheduler(Scheduling.KAIROS, this.schedulerID);
     started = true;
   }
 
@@ -363,7 +405,7 @@ public class NettyRpcServer extends RpcServer {
     }
     allChannels.close().awaitUninterruptibly();
     serverChannel.close();
-    scheduler.stop();
+    Kairos.stopScheduler(Scheduling.KAIROS, this.schedulerID);
     closed.countDown();
     running = false;
   }
