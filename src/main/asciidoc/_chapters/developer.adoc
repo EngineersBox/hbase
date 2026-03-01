@@ -214,7 +214,7 @@ To import the project, click  and select the HBase root directory. `m2eclipse`  
 If you install +m2eclipse+ and import HBase in your workspace, do the following to fix your eclipse Build Path.
 
 . Remove _target_ folder
-. Add _target/generated-jamon_ and _target/generated-sources/java_ folders.
+. Add _target/generated-sources/java_ folder.
 . Remove from your Build Path the exclusions on the _src/main/resources_ and _src/test/resources_ to avoid error message in the console, such as the following:
 +
 ----
@@ -1308,12 +1308,11 @@ to put on your new HBase test case.
 
 .Categorizing Tests
 Small Tests (((SmallTests)))::
-  _Small_ test cases are executed in a shared JVM and each test suite/test class should
+  _Small_ test cases are executed in separate JVM and each test suite/test class should
    run in 15 seconds or less; i.e. a link:https://en.wikipedia.org/wiki/JUnit[junit test fixture], a java object made
    up of test methods, should finish in under 15 seconds, no matter how many or how few test methods
    it has. These test cases should not use a minicluster as a minicluster starts many services,
-   most unrelated to what is being tested. Multiple start/stops may leak resources or just overwhelm
-   the single JVM context.
+   most unrelated to what is being tested.
 
 Medium Tests (((MediumTests)))::
   _Medium_ test cases are executed in separate JVM and individual test suites or test classes or in

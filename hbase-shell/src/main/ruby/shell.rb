@@ -467,6 +467,7 @@ Shell.load_command_group(
     unassign
     zk_dump
     wal_roll
+    wal_roll_all
     hbck_chore_run
     catalogjanitor_run
     catalogjanitor_switch
@@ -575,6 +576,7 @@ Shell.load_command_group(
     list_snapshot_sizes
     enable_rpc_throttle
     disable_rpc_throttle
+    rpc_throttle_enabled
     enable_exceed_throttle_quota
     disable_exceed_throttle_quota
   ]

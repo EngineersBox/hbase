@@ -180,6 +180,12 @@ module Hbase
     alias hlog_roll wal_roll
 
     #----------------------------------------------------------------------------------------------
+    # Requests all region servers to roll wal writer
+    def wal_roll_all
+      @admin.rollAllWALWriters
+    end
+
+    #----------------------------------------------------------------------------------------------
     # Requests a table or region split
     def split(table_or_region_name, split_point = nil)
       split_point_bytes = nil
@@ -1005,7 +1011,7 @@ module Hbase
           r_load_source_map = sl.getReplicationLoadSourceMap
           build_source_string(r_load_source_map, r_source_string)
 
-          puts(format('    %<host>s:', host: server_name.getHostname))
+          puts(format('    %<host>s:%<port>s %<startcode>s', host: server_name.getHostname, port:server_name.getPort, startcode: server_name.getStartcode))
           if type.casecmp('SOURCE').zero?
             puts(format('%<source>s', source: r_source_string))
           elsif type.casecmp('SINK').zero?
@@ -1029,11 +1035,11 @@ module Hbase
             puts('    no active tasks')
           end
         end
-        puts(format('%d live servers', cluster_metrics.getServersSize))
-        for server in cluster_metrics.getServers
-          puts(format('    %s:%d %d', server.getHostname, server.getPort, server.getStartcode))
+        puts(format('%d live servers', cluster_metrics.getLiveServerMetrics.size))
+        cluster_metrics.getLiveServerMetrics.keySet.each do |server_name|
+          puts(format('    %s:%d %d', server_name.getHostname, server_name.getPort, server_name.getStartcode))
           printed = false
-          for task in cluster_metrics.getLiveServerMetrics.get(server).getTasks
+          for task in cluster_metrics.getLiveServerMetrics.get(server_name).getTasks
             next unless task.getState.name == 'RUNNING'
             puts(format('        %s', task.toString))
             printed = true
@@ -1216,6 +1222,10 @@ module Hbase
           )
           cfdb.setEncryptionKey(org.apache.hadoop.hbase.security.EncryptionUtil.wrapKey(@conf, key,
                                                                                           algorithm))
+        end
+        if arg.include?(ColumnFamilyDescriptorBuilder::ENCRYPTION_KEY_NAMESPACE)
+          cfdb.setEncryptionKeyNamespace(arg.delete(
+            ColumnFamilyDescriptorBuilder::ENCRYPTION_KEY_NAMESPACE))
         end
       end
       if arg.include?(ColumnFamilyDescriptorBuilder::COMPRESSION_COMPACT)
@@ -1474,7 +1484,7 @@ module Hbase
     def list_namespace(regex = '.*')
       pattern = java.util.regex.Pattern.compile(regex)
       list = @admin.listNamespaces
-      list.select { |s| pattern.match(s) }
+      list.select { |s| pattern.matcher(s).matches }
     end
 
     #----------------------------------------------------------------------------------------------

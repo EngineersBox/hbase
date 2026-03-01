@@ -441,29 +441,6 @@ public class HRegionFileSystem {
   }
 
   /**
-   * Archives the specified store file from the specified family.
-   * @param familyName Family that contains the store files
-   * @param filePath   {@link Path} to the store file to remove
-   * @throws IOException if the archiving fails
-   */
-  public void removeStoreFile(final String familyName, final Path filePath) throws IOException {
-    HFileArchiver.archiveStoreFile(this.conf, this.fs, this.regionInfoForFs, this.tableDir,
-      Bytes.toBytes(familyName), filePath);
-  }
-
-  /**
-   * Closes and archives the specified store files from the specified family.
-   * @param familyName Family that contains the store files
-   * @param storeFiles set of store files to remove
-   * @throws IOException if the archiving fails
-   */
-  public void removeStoreFiles(String familyName, Collection<HStoreFile> storeFiles)
-    throws IOException {
-    HFileArchiver.archiveStoreFiles(this.conf, this.fs, this.regionInfoForFs, this.tableDir,
-      Bytes.toBytes(familyName), storeFiles);
-  }
-
-  /**
    * Bulk load: Add a specified store file to the specified family. If the source file is on the
    * same different file-system is moved from the source location to the destination location,
    * otherwise is copied over.
@@ -787,7 +764,10 @@ public class HRegionFileSystem {
     // First check to get the permissions
     FsPermission perms = CommonFSUtils.getFilePermissions(fs, conf, HConstants.DATA_FILE_UMASK_KEY);
     // Write the RegionInfo file content
-    try (FSDataOutputStream out = FSUtils.create(conf, fs, regionInfoFile, perms, null)) {
+    // HBASE-29662: Fail .regioninfo file creation, if the region directory doesn't exist,
+    // avoiding silent masking of missing region directories during region initialization.
+    // The region directory should already exist when this method is called.
+    try (FSDataOutputStream out = FSUtils.create(conf, fs, regionInfoFile, perms, null, false)) {
       out.write(content);
     }
   }
@@ -869,6 +849,14 @@ public class HRegionFileSystem {
       // Hence delete and create the file if exists.
       if (CommonFSUtils.isExists(fs, tmpPath)) {
         CommonFSUtils.delete(fs, tmpPath, true);
+      }
+
+      // Check parent (region) directory exists first to maintain HBASE-29662 protection
+      if (!fs.exists(getRegionDir())) {
+        throw new IOException("Region directory does not exist: " + getRegionDir());
+      }
+      if (!fs.exists(getTempDir())) {
+        fs.mkdirs(getTempDir());
       }
 
       // Write HRI to a file in case we need to recover hbase:meta
@@ -986,6 +974,31 @@ public class HRegionFileSystem {
     if (!fs.delete(regionDir, true)) {
       LOG.warn("Failed delete of " + regionDir);
     }
+  }
+
+  /**
+   * Retrieves the Region ID from the given HFile path.
+   * @param hFilePath The path of the HFile.
+   * @return The Region ID extracted from the HFile path.
+   * @throws IOException If an I/O error occurs or if the HFile path is incorrect.
+   */
+  public static String getRegionId(Path hFilePath) throws IOException {
+    if (hFilePath.getParent() == null || hFilePath.getParent().getParent() == null) {
+      throw new IOException("Incorrect HFile Path: " + hFilePath);
+    }
+    Path dir = hFilePath.getParent().getParent();
+    if (isTemporaryDirectoryName(dir.getName())) {
+      if (dir.getParent() == null) {
+        throw new IOException("Incorrect HFile Path: " + hFilePath);
+      }
+      return dir.getParent().getName();
+    }
+    return dir.getName();
+  }
+
+  private static boolean isTemporaryDirectoryName(String dirName) {
+    return REGION_MERGES_DIR.equals(dirName) || REGION_SPLITS_DIR.equals(dirName)
+      || REGION_TEMP_DIR.equals(dirName);
   }
 
   /**

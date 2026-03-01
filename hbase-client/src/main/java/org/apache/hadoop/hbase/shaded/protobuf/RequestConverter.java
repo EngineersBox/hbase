@@ -139,6 +139,8 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.NormalizeR
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.OfflineRegionRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.RecommissionRegionServerRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.RegionSpecifierAndState;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.ReopenTableRegionsRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.RollAllWALWritersRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.RunCatalogScanRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.RunCleanerChoreRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.SetBalancerRunningRequest;
@@ -860,6 +862,11 @@ public final class RequestConverter {
     return RollWALWriterRequest.getDefaultInstance();
   }
 
+  public static RollAllWALWritersRequest buildRollAllWALWritersRequest(long nonceGroup,
+    long nonce) {
+    return RollAllWALWritersRequest.newBuilder().setNonceGroup(nonceGroup).setNonce(nonce).build();
+  }
+
   /**
    * Create a new GetServerInfoRequest
    * @return a GetServerInfoRequest
@@ -1119,6 +1126,31 @@ public final class RequestConverter {
     builder.setNonceGroup(nonceGroup);
     builder.setNonce(nonce);
     builder.setReopenRegions(reopenRegions);
+    return builder.build();
+  }
+
+  /**
+   * Creates a protocol buffer ReopenTableRegionsRequest
+   * @param tableName   table whose regions to reopen
+   * @param regionNames specific regions to reopen (empty = all regions)
+   * @param nonceGroup  nonce group
+   * @param nonce       nonce
+   * @return a ReopenTableRegionsRequest
+   */
+  public static ReopenTableRegionsRequest buildReopenTableRegionsRequest(final TableName tableName,
+    final List<byte[]> regionNames, final long nonceGroup, final long nonce) {
+    ReopenTableRegionsRequest.Builder builder = ReopenTableRegionsRequest.newBuilder();
+    builder.setTableName(ProtobufUtil.toProtoTableName(tableName));
+
+    if (regionNames != null && !regionNames.isEmpty()) {
+      for (byte[] regionName : regionNames) {
+        builder.addRegionNames(UnsafeByteOperations.unsafeWrap(regionName));
+      }
+    }
+
+    builder.setNonceGroup(nonceGroup);
+    builder.setNonce(nonce);
+
     return builder.build();
   }
 

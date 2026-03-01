@@ -73,6 +73,10 @@ public class CacheConfig implements PropagatingConfigurationObserver {
    */
   public static final String EVICT_BLOCKS_ON_CLOSE_KEY = "hbase.rs.evictblocksonclose";
 
+  /**
+   * Configuration key to evict all blocks of a parent region from the block cache when the region
+   * split or merge.
+   */
   public static final String EVICT_BLOCKS_ON_SPLIT_KEY = "hbase.rs.evictblocksonsplit";
 
   /**
@@ -132,7 +136,7 @@ public class CacheConfig implements PropagatingConfigurationObserver {
   private volatile boolean cacheDataOnRead;
 
   /** Whether blocks should be flagged as in-memory when being cached */
-  private final boolean inMemory;
+  private boolean inMemory;
 
   /** Whether data blocks should be cached when new files are written */
   private volatile boolean cacheDataOnWrite;
@@ -146,30 +150,35 @@ public class CacheConfig implements PropagatingConfigurationObserver {
   /** Whether blocks of a file should be evicted when the file is closed */
   private volatile boolean evictOnClose;
 
+  /**
+   * Whether blocks of a parent region should be evicted from cache when the region split or merge
+   */
+  private boolean evictOnSplit;
+
   /** Whether data blocks should be stored in compressed and/or encrypted form in the cache */
-  private final boolean cacheDataCompressed;
+  private boolean cacheDataCompressed;
 
   /** Whether data blocks should be prefetched into the cache */
-  private final boolean prefetchOnOpen;
+  private boolean prefetchOnOpen;
 
   /**
    * Whether data blocks should be cached when compacted file is written
    */
-  private final boolean cacheCompactedDataOnWrite;
+  private boolean cacheCompactedDataOnWrite;
 
   /**
    * Determine threshold beyond which we do not cache blocks on compaction
    */
   private long cacheCompactedDataOnWriteThreshold;
 
-  private final boolean dropBehindCompaction;
+  private boolean dropBehindCompaction;
 
   // Local reference to the block cache
   private final BlockCache blockCache;
 
   private final ByteBuffAllocator byteBuffAllocator;
 
-  private final double heapUsageThreshold;
+  private double heapUsageThreshold;
 
   /**
    * Create a cache configuration using the specified configuration object and defaults for family
@@ -191,32 +200,35 @@ public class CacheConfig implements PropagatingConfigurationObserver {
    */
   public CacheConfig(Configuration conf, ColumnFamilyDescriptor family, BlockCache blockCache,
     ByteBuffAllocator byteBuffAllocator) {
-    this.cacheDataOnRead = conf.getBoolean(CACHE_DATA_ON_READ_KEY, DEFAULT_CACHE_DATA_ON_READ)
-      && (family == null ? true : family.isBlockCacheEnabled());
-    this.inMemory = family == null ? DEFAULT_IN_MEMORY : family.isInMemory();
-    this.cacheDataCompressed =
-      conf.getBoolean(CACHE_DATA_BLOCKS_COMPRESSED_KEY, DEFAULT_CACHE_DATA_COMPRESSED);
-    this.dropBehindCompaction =
-      conf.getBoolean(DROP_BEHIND_CACHE_COMPACTION_KEY, DROP_BEHIND_CACHE_COMPACTION_DEFAULT);
-    // For the following flags we enable them regardless of per-schema settings
-    // if they are enabled in the global configuration.
-    this.cacheDataOnWrite = conf.getBoolean(CACHE_BLOCKS_ON_WRITE_KEY, DEFAULT_CACHE_DATA_ON_WRITE)
-      || (family == null ? false : family.isCacheDataOnWrite());
-    this.cacheIndexesOnWrite =
-      conf.getBoolean(CACHE_INDEX_BLOCKS_ON_WRITE_KEY, DEFAULT_CACHE_INDEXES_ON_WRITE)
-        || (family == null ? false : family.isCacheIndexesOnWrite());
-    this.cacheBloomsOnWrite =
-      conf.getBoolean(CACHE_BLOOM_BLOCKS_ON_WRITE_KEY, DEFAULT_CACHE_BLOOMS_ON_WRITE)
-        || (family == null ? false : family.isCacheBloomsOnWrite());
-    this.evictOnClose = conf.getBoolean(EVICT_BLOCKS_ON_CLOSE_KEY, DEFAULT_EVICT_ON_CLOSE)
-      || (family == null ? false : family.isEvictBlocksOnClose());
-    this.prefetchOnOpen = conf.getBoolean(PREFETCH_BLOCKS_ON_OPEN_KEY, DEFAULT_PREFETCH_ON_OPEN)
-      || (family == null ? false : family.isPrefetchBlocksOnOpen());
-    this.cacheCompactedDataOnWrite =
-      conf.getBoolean(CACHE_COMPACTED_BLOCKS_ON_WRITE_KEY, DEFAULT_CACHE_COMPACTED_BLOCKS_ON_WRITE);
-    this.cacheCompactedDataOnWriteThreshold = getCacheCompactedBlocksOnWriteThreshold(conf);
-    this.heapUsageThreshold =
-      conf.getDouble(PREFETCH_HEAP_USAGE_THRESHOLD, DEFAULT_PREFETCH_HEAP_USAGE_THRESHOLD);
+    if (family == null || family.isBlockCacheEnabled()) {
+      this.cacheDataOnRead = conf.getBoolean(CACHE_DATA_ON_READ_KEY, DEFAULT_CACHE_DATA_ON_READ);
+      this.inMemory = family == null ? DEFAULT_IN_MEMORY : family.isInMemory();
+      this.cacheDataCompressed =
+        conf.getBoolean(CACHE_DATA_BLOCKS_COMPRESSED_KEY, DEFAULT_CACHE_DATA_COMPRESSED);
+      this.dropBehindCompaction =
+        conf.getBoolean(DROP_BEHIND_CACHE_COMPACTION_KEY, DROP_BEHIND_CACHE_COMPACTION_DEFAULT);
+      // For the following flags we enable them regardless of per-schema settings
+      // if they are enabled in the global configuration.
+      this.cacheDataOnWrite =
+        conf.getBoolean(CACHE_BLOCKS_ON_WRITE_KEY, DEFAULT_CACHE_DATA_ON_WRITE)
+          || (family != null && family.isCacheDataOnWrite());
+      this.cacheIndexesOnWrite =
+        conf.getBoolean(CACHE_INDEX_BLOCKS_ON_WRITE_KEY, DEFAULT_CACHE_INDEXES_ON_WRITE)
+          || (family != null && family.isCacheIndexesOnWrite());
+      this.cacheBloomsOnWrite =
+        conf.getBoolean(CACHE_BLOOM_BLOCKS_ON_WRITE_KEY, DEFAULT_CACHE_BLOOMS_ON_WRITE)
+          || (family != null && family.isCacheBloomsOnWrite());
+      this.evictOnClose = conf.getBoolean(EVICT_BLOCKS_ON_CLOSE_KEY, DEFAULT_EVICT_ON_CLOSE)
+        || (family != null && family.isEvictBlocksOnClose());
+      this.evictOnSplit = conf.getBoolean(EVICT_BLOCKS_ON_SPLIT_KEY, DEFAULT_EVICT_ON_SPLIT);
+      this.prefetchOnOpen = conf.getBoolean(PREFETCH_BLOCKS_ON_OPEN_KEY, DEFAULT_PREFETCH_ON_OPEN)
+        || (family != null && family.isPrefetchBlocksOnOpen());
+      this.cacheCompactedDataOnWrite = conf.getBoolean(CACHE_COMPACTED_BLOCKS_ON_WRITE_KEY,
+        DEFAULT_CACHE_COMPACTED_BLOCKS_ON_WRITE);
+      this.cacheCompactedDataOnWriteThreshold = getCacheCompactedBlocksOnWriteThreshold(conf);
+      this.heapUsageThreshold =
+        conf.getDouble(PREFETCH_HEAP_USAGE_THRESHOLD, DEFAULT_PREFETCH_HEAP_USAGE_THRESHOLD);
+    }
     this.blockCache = blockCache;
     this.byteBuffAllocator = byteBuffAllocator;
   }
@@ -231,6 +243,7 @@ public class CacheConfig implements PropagatingConfigurationObserver {
     this.cacheIndexesOnWrite = cacheConf.cacheIndexesOnWrite;
     this.cacheBloomsOnWrite = cacheConf.cacheBloomsOnWrite;
     this.evictOnClose = cacheConf.evictOnClose;
+    this.evictOnSplit = cacheConf.evictOnSplit;
     this.cacheDataCompressed = cacheConf.cacheDataCompressed;
     this.prefetchOnOpen = cacheConf.prefetchOnOpen;
     this.cacheCompactedDataOnWrite = cacheConf.cacheCompactedDataOnWrite;
@@ -248,9 +261,11 @@ public class CacheConfig implements PropagatingConfigurationObserver {
     this.cacheIndexesOnWrite = false;
     this.cacheBloomsOnWrite = false;
     this.evictOnClose = false;
+    this.evictOnSplit = false;
     this.cacheDataCompressed = false;
     this.prefetchOnOpen = false;
     this.cacheCompactedDataOnWrite = false;
+    this.cacheCompactedDataOnWriteThreshold = DEFAULT_CACHE_COMPACTED_BLOCKS_ON_WRITE_THRESHOLD;
     this.dropBehindCompaction = false;
     this.blockCache = null;
     this.byteBuffAllocator = ByteBuffAllocator.HEAP;
@@ -277,6 +292,19 @@ public class CacheConfig implements PropagatingConfigurationObserver {
   public boolean shouldCacheBlockOnRead(BlockCategory category) {
     return cacheDataOnRead || category == BlockCategory.INDEX || category == BlockCategory.BLOOM
       || (prefetchOnOpen && (category != BlockCategory.META && category != BlockCategory.UNKNOWN));
+  }
+
+  public boolean shouldCacheBlockOnRead(BlockCategory category, HFileInfo hFileInfo,
+    Configuration conf) {
+    Optional<Boolean> cacheFileBlock = Optional.of(true);
+    // For DATA blocks only, if BucketCache is in use, we don't need to cache block again
+    if (getBlockCache().isPresent() && category.equals(BlockCategory.DATA)) {
+      Optional<Boolean> result = getBlockCache().get().shouldCacheFile(hFileInfo, conf);
+      if (result.isPresent()) {
+        cacheFileBlock = result;
+      }
+    }
+    return shouldCacheBlockOnRead(category) && cacheFileBlock.get();
   }
 
   /** Returns true if blocks in this file should be flagged as in-memory */
@@ -334,12 +362,19 @@ public class CacheConfig implements PropagatingConfigurationObserver {
   }
 
   /**
-   * Only used for testing.
    * @param evictOnClose whether blocks should be evicted from the cache when an HFile reader is
    *                     closed
    */
   public void setEvictOnClose(boolean evictOnClose) {
     this.evictOnClose = evictOnClose;
+  }
+
+  /**
+   * @return true if blocks of parent region should be evicted from the cache when the region split
+   *         or merge, false if not
+   */
+  public boolean shouldEvictOnSplit() {
+    return this.evictOnSplit;
   }
 
   /** Returns true if data blocks should be compressed in the cache, false if not */
@@ -348,7 +383,7 @@ public class CacheConfig implements PropagatingConfigurationObserver {
   }
 
   /**
-   * Returns true if this {@link BlockCategory} should be compressed in blockcache, false otherwise
+   * Returns true if this {@link BlockCategory} should be compressed in BlockCache, false otherwise
    */
   public boolean shouldCacheCompressed(BlockCategory category) {
     switch (category) {
@@ -466,8 +501,12 @@ public class CacheConfig implements PropagatingConfigurationObserver {
     return "cacheDataOnRead=" + shouldCacheDataOnRead() + ", cacheDataOnWrite="
       + shouldCacheDataOnWrite() + ", cacheIndexesOnWrite=" + shouldCacheIndexesOnWrite()
       + ", cacheBloomsOnWrite=" + shouldCacheBloomsOnWrite() + ", cacheEvictOnClose="
-      + shouldEvictOnClose() + ", cacheDataCompressed=" + shouldCacheDataCompressed()
-      + ", prefetchOnOpen=" + shouldPrefetchOnOpen();
+      + shouldEvictOnClose() + ", cacheEvictOnSplit=" + shouldEvictOnSplit()
+      + ", cacheDataCompressed=" + shouldCacheDataCompressed() + ", prefetchOnOpen="
+      + shouldPrefetchOnOpen() + ", cacheCompactedDataOnWrite="
+      + shouldCacheCompactedBlocksOnWrite() + ", cacheCompactedDataOnWriteThreshold="
+      + getCacheCompactedBlocksOnWriteThreshold() + ", dropBehindCompaction="
+      + shouldDropBehindCompaction();
   }
 
   @Override

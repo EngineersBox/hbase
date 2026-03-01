@@ -103,7 +103,7 @@ public abstract class RegionRemoteProcedureBase extends Procedure<MasterProcedur
     newRemoteOperation(MasterProcedureEnv env);
 
   @Override
-  public void remoteOperationCompleted(MasterProcedureEnv env) {
+  public void remoteOperationCompleted(MasterProcedureEnv env, byte[] remoteResultData) {
     // should not be called since we use reportRegionStateTransition to report the result
     throw new UnsupportedOperationException();
   }
@@ -155,6 +155,9 @@ public abstract class RegionRemoteProcedureBase extends Procedure<MasterProcedur
 
   @Override
   protected boolean waitInitialized(MasterProcedureEnv env) {
+    if (isCriticalSystemTable()) {
+      return false;
+    }
     if (TableName.isMetaTableName(getTableName())) {
       return false;
     }

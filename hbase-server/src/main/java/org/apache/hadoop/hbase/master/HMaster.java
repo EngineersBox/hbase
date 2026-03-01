@@ -160,6 +160,7 @@ import org.apache.hadoop.hbase.master.procedure.DisableTableProcedure;
 import org.apache.hadoop.hbase.master.procedure.EnableTableProcedure;
 import org.apache.hadoop.hbase.master.procedure.FlushTableProcedure;
 import org.apache.hadoop.hbase.master.procedure.InitMetaProcedure;
+import org.apache.hadoop.hbase.master.procedure.LogRollProcedure;
 import org.apache.hadoop.hbase.master.procedure.MasterProcedureConstants;
 import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
 import org.apache.hadoop.hbase.master.procedure.MasterProcedureScheduler;
@@ -287,10 +288,10 @@ import org.apache.hbase.thirdparty.com.google.common.io.Closeables;
 import org.apache.hbase.thirdparty.com.google.gson.JsonParseException;
 import org.apache.hbase.thirdparty.com.google.protobuf.Descriptors;
 import org.apache.hbase.thirdparty.com.google.protobuf.Service;
+import org.apache.hbase.thirdparty.org.eclipse.jetty.ee8.servlet.ServletHolder;
+import org.apache.hbase.thirdparty.org.eclipse.jetty.ee8.webapp.WebAppContext;
 import org.apache.hbase.thirdparty.org.eclipse.jetty.server.Server;
 import org.apache.hbase.thirdparty.org.eclipse.jetty.server.ServerConnector;
-import org.apache.hbase.thirdparty.org.eclipse.jetty.servlet.ServletHolder;
-import org.apache.hbase.thirdparty.org.eclipse.jetty.webapp.WebAppContext;
 import org.apache.hbase.thirdparty.org.glassfish.jersey.server.ResourceConfig;
 import org.apache.hbase.thirdparty.org.glassfish.jersey.servlet.ServletContainer;
 
@@ -1052,7 +1053,8 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
     // TODO: Generate the splitting and live Set in one pass instead of two as we currently do.
     this.regionServerTracker.upgrade(
       procsByType.getOrDefault(ServerCrashProcedure.class, Collections.emptyList()).stream()
-        .map(p -> (ServerCrashProcedure) p).map(p -> p.getServerName()).collect(Collectors.toSet()),
+        .map(p -> (ServerCrashProcedure) p).collect(
+          Collectors.toMap(ServerCrashProcedure::getServerName, Procedure::getSubmittedTime)),
       Sets.union(rsListStorage.getAll(), walManager.getLiveServersFromWALDir()),
       walManager.getSplittingServersFromWALDir());
     // This manager must be accessed AFTER hbase:meta is confirmed on line..
@@ -1078,7 +1080,7 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
     if (!maintenanceMode) {
       startupTaskGroup.addTask("Initializing master coprocessors");
       setQuotasObserver(conf);
-      initializeCoprocessorHost(conf);
+      this.cpHost = new MasterCoprocessorHost(this, conf);
     } else {
       // start an in process region server for carrying system regions
       maintenanceRegionServer =
@@ -1160,6 +1162,7 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
     final ColumnFamilyDescriptor replBarrierFamilyDesc =
       metaDescriptor.getColumnFamily(HConstants.REPLICATION_BARRIER_FAMILY);
 
+    this.assignmentManager.initializationPostMetaOnline();
     this.assignmentManager.joinCluster();
     // The below depends on hbase:meta being online.
     this.assignmentManager.processOfflineRegions();
@@ -1421,6 +1424,10 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
       .setColumnFamily(FSTableDescriptors.getTableFamilyDescForMeta(conf))
       .setColumnFamily(FSTableDescriptors.getReplBarrierFamilyDescForMeta()).build();
     long pid = this.modifyTable(TableName.META_TABLE_NAME, () -> newMetaDesc, 0, 0, false);
+    waitForProcedureToComplete(pid, "Failed to add table and rep_barrier CFs to meta");
+  }
+
+  private void waitForProcedureToComplete(long pid, String errorMessage) throws IOException {
     int tries = 30;
     while (
       !(getMasterProcedureExecutor().isFinished(pid)) && getMasterProcedureExecutor().isRunning()
@@ -1439,8 +1446,8 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
     } else {
       Procedure<?> result = getMasterProcedureExecutor().getResult(pid);
       if (result != null && result.isFailed()) {
-        throw new IOException("Failed to add table and rep_barrier CFs to meta. "
-          + MasterProcedureUtil.unwrapRemoteIOException(result));
+        throw new IOException(
+          errorMessage + ". " + MasterProcedureUtil.unwrapRemoteIOException(result));
       }
     }
   }
@@ -1627,6 +1634,12 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
   @Override
   public MasterWalManager getMasterWalManager() {
     return this.walManager;
+  }
+
+  @Override
+  public boolean rotateSystemKeyIfChanged() throws IOException {
+    // STUB - Feature not yet implemented
+    return false;
   }
 
   @Override
@@ -1867,8 +1880,15 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
     configurationManager.registerObserver(procEnv);
 
     int cpus = Runtime.getRuntime().availableProcessors();
-    final int numThreads = conf.getInt(MasterProcedureConstants.MASTER_PROCEDURE_THREADS, Math.max(
-      (cpus > 0 ? cpus / 4 : 0), MasterProcedureConstants.DEFAULT_MIN_MASTER_PROCEDURE_THREADS));
+    int defaultNumThreads = Math.max((cpus > 0 ? cpus / 4 : 0),
+      MasterProcedureConstants.DEFAULT_MIN_MASTER_PROCEDURE_THREADS);
+    int numThreads =
+      conf.getInt(MasterProcedureConstants.MASTER_PROCEDURE_THREADS, defaultNumThreads);
+    if (numThreads <= 0) {
+      LOG.warn("{} is set to {}, which is invalid, using default value {} instead",
+        MasterProcedureConstants.MASTER_PROCEDURE_THREADS, numThreads, defaultNumThreads);
+      numThreads = defaultNumThreads;
+    }
     final boolean abortOnCorruption =
       conf.getBoolean(MasterProcedureConstants.EXECUTOR_ABORT_ON_CORRUPTION,
         MasterProcedureConstants.DEFAULT_EXECUTOR_ABORT_ON_CORRUPTION);
@@ -1999,7 +2019,7 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
     // But if there are zero regions in transition, it can skip sleep to speed up.
     while (
       !interrupted && EnvironmentEdgeManager.currentTime() < nextBalanceStartTime
-        && this.assignmentManager.getRegionStates().hasRegionsInTransition()
+        && this.assignmentManager.getRegionTransitScheduledCount() > 0
     ) {
       try {
         Thread.sleep(100);
@@ -2011,8 +2031,7 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
     // Throttling by max number regions in transition
     while (
       !interrupted && maxRegionsInTransition > 0
-        && this.assignmentManager.getRegionStates().getRegionsInTransitionCount()
-            >= maxRegionsInTransition
+        && this.assignmentManager.getRegionTransitScheduledCount() >= maxRegionsInTransition
         && EnvironmentEdgeManager.currentTime() <= cutoffTime
     ) {
       try {
@@ -2091,7 +2110,7 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
 
     synchronized (this.balancer) {
       // Only allow one balance run at at time.
-      if (this.assignmentManager.hasRegionsInTransition()) {
+      if (this.assignmentManager.getRegionTransitScheduledCount() > 0) {
         List<RegionStateNode> regionsInTransition = assignmentManager.getRegionsInTransition();
         // if hbase:meta region is in transition, result of assignment cannot be recorded
         // ignore the force flag in that case
@@ -2106,7 +2125,8 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
 
         if (!request.isIgnoreRegionsInTransition() || metaInTransition) {
           LOG.info("Not running balancer (ignoreRIT=false" + ", metaRIT=" + metaInTransition
-            + ") because " + regionsInTransition.size() + " region(s) in transition: " + toPrint
+            + ") because " + assignmentManager.getRegionTransitScheduledCount()
+            + " region(s) are scheduled to transit " + toPrint
             + (truncated ? "(truncated list)" : ""));
           return responseBuilder.build();
         }
@@ -2243,7 +2263,7 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
     if (skipRegionManagementAction("region normalizer")) {
       return false;
     }
-    if (assignmentManager.hasRegionsInTransition()) {
+    if (assignmentManager.getRegionTransitScheduledCount() > 0) {
       return false;
     }
 
@@ -2498,6 +2518,11 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
 
   @Override
   public long createSystemTable(final TableDescriptor tableDescriptor) throws IOException {
+    return createSystemTable(tableDescriptor, false);
+  }
+
+  private long createSystemTable(final TableDescriptor tableDescriptor, final boolean isCritical)
+    throws IOException {
     if (isStopped()) {
       throw new MasterNotRunningException();
     }
@@ -2514,10 +2539,10 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
 
     // This special create table is called locally to master. Therefore, no RPC means no need
     // to use nonce to detect duplicated RPC call.
-    long procId = this.procedureExecutor.submitProcedure(
-      new CreateTableProcedure(procedureExecutor.getEnvironment(), tableDescriptor, newRegions));
-
-    return procId;
+    CreateTableProcedure proc =
+      new CreateTableProcedure(procedureExecutor.getEnvironment(), tableDescriptor, newRegions);
+    proc.setCriticalSystemTable(isCritical);
+    return this.procedureExecutor.submitProcedure(proc);
   }
 
   private void startActiveMasterManager(int infoPort) throws KeeperException {
@@ -3073,7 +3098,7 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
         case REGIONS_IN_TRANSITION: {
           if (assignmentManager != null) {
             builder.setRegionsInTransition(
-              assignmentManager.getRegionStates().getRegionsStateInTransition());
+              new ArrayList<>(assignmentManager.getRegionsStateInTransition()));
           }
           break;
         }
@@ -4194,11 +4219,11 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
     return (RemoteProcedure<MasterProcedureEnv, ?>) procedure;
   }
 
-  public void remoteProcedureCompleted(long procId) {
+  public void remoteProcedureCompleted(long procId, byte[] remoteResultData) {
     LOG.debug("Remote procedure done, pid={}", procId);
     RemoteProcedure<MasterProcedureEnv, ?> procedure = getRemoteProcedure(procId);
     if (procedure != null) {
-      procedure.remoteOperationCompleted(procedureExecutor.getEnvironment());
+      procedure.remoteOperationCompleted(procedureExecutor.getEnvironment(), remoteResultData);
     }
   }
 
@@ -4239,6 +4264,54 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
 
       });
 
+  }
+
+  /**
+   * Reopen regions provided in the argument. Applies throttling to the procedure to avoid
+   * overwhelming the system. This is used by the reopenTableRegions methods in the Admin API via
+   * HMaster.
+   * @param tableName   The current table name
+   * @param regionNames The region names of the regions to reopen
+   * @param nonceGroup  Identifier for the source of the request, a client or process
+   * @param nonce       A unique identifier for this operation from the client or process identified
+   *                    by <code>nonceGroup</code> (the source must ensure each operation gets a
+   *                    unique id).
+   * @return procedure Id
+   * @throws IOException if reopening region fails while running procedure
+   */
+  long reopenRegionsThrottled(final TableName tableName, final List<byte[]> regionNames,
+    final long nonceGroup, final long nonce) throws IOException {
+
+    checkInitialized();
+
+    if (!tableStateManager.isTablePresent(tableName)) {
+      throw new TableNotFoundException(tableName);
+    }
+
+    return MasterProcedureUtil
+      .submitProcedure(new MasterProcedureUtil.NonceProcedureRunnable(this, nonceGroup, nonce) {
+        @Override
+        protected void run() throws IOException {
+          ReopenTableRegionsProcedure proc;
+          if (regionNames.isEmpty()) {
+            proc = ReopenTableRegionsProcedure.throttled(getConfiguration(),
+              getTableDescriptors().get(tableName));
+          } else {
+            proc = ReopenTableRegionsProcedure.throttled(getConfiguration(),
+              getTableDescriptors().get(tableName), regionNames);
+          }
+
+          LOG.info("{} throttled reopening {} regions for table {}", getClientIdAuditPrefix(),
+            regionNames.isEmpty() ? "all" : regionNames.size(), tableName);
+
+          submitProcedure(proc);
+        }
+
+        @Override
+        protected String getDescription() {
+          return "Throttled ReopenTableRegionsProcedure for " + tableName;
+        }
+      });
   }
 
   @Override
@@ -4407,11 +4480,11 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
     setQuotasObserver(newConf);
     // update region server coprocessor if the configuration has changed.
     if (
-      CoprocessorConfigurationUtil.checkConfigurationChange(getConfiguration(), newConf,
+      CoprocessorConfigurationUtil.checkConfigurationChange(this.cpHost, newConf,
         CoprocessorHost.MASTER_COPROCESSOR_CONF_KEY) && !maintenanceMode
     ) {
       LOG.info("Update the master coprocessor(s) because the configuration has changed");
-      initializeCoprocessorHost(newConf);
+      this.cpHost = new MasterCoprocessorHost(this, newConf);
     }
   }
 
@@ -4510,11 +4583,6 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
     }
   }
 
-  private void initializeCoprocessorHost(Configuration conf) {
-    // initialize master side coprocessors before we start handling requests
-    this.cpHost = new MasterCoprocessorHost(this, conf);
-  }
-
   @Override
   public long flushTable(TableName tableName, List<byte[]> columnFamilies, long nonceGroup,
     long nonce) throws IOException {
@@ -4532,7 +4600,7 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
         @Override
         protected void run() throws IOException {
           getMaster().getMasterCoprocessorHost().preTableFlush(tableName);
-          LOG.info(getClientIdAuditPrefix() + " flush " + tableName);
+          LOG.info("{} flush {}", getClientIdAuditPrefix(), tableName);
           submitProcedure(
             new FlushTableProcedure(procedureExecutor.getEnvironment(), tableName, columnFamilies));
           getMaster().getMasterCoprocessorHost().postTableFlush(tableName);
@@ -4544,4 +4612,28 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
         }
       });
   }
+
+  @Override
+  public long rollAllWALWriters(long nonceGroup, long nonce) throws IOException {
+    return MasterProcedureUtil
+      .submitProcedure(new MasterProcedureUtil.NonceProcedureRunnable(this, nonceGroup, nonce) {
+        @Override
+        protected void run() {
+          LOG.info("{} roll all wal writers", getClientIdAuditPrefix());
+          submitProcedure(new LogRollProcedure());
+        }
+
+        @Override
+        protected String getDescription() {
+          return "RollAllWALWriters";
+        }
+      });
+  }
+
+  @RestrictedApi(explanation = "Should only be called in tests", link = "",
+      allowedOnPath = ".*/src/test/.*")
+  public MobFileCleanerChore getMobFileCleanerChore() {
+    return mobFileCleanerChore;
+  }
+
 }

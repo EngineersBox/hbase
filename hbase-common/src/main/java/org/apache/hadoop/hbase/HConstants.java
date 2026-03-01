@@ -1503,6 +1503,12 @@ public final class HConstants {
   public static final String ZK_SERVER_KERBEROS_PRINCIPAL =
     "hbase.zookeeper.server.kerberos.principal";
 
+  /**
+   * Configuration entries with this prefix are passed to the RPC ConnectionHeader and become
+   * accessible on the server side.
+   */
+  public static final String CLIENT_HEADER_PREFIX = "hbase.client.header.";
+
   /** Config key for hbase temporary directory in hdfs */
   public static final String TEMPORARY_FS_DIRECTORY_KEY = "hbase.fs.tmp.dir";
 
@@ -1532,6 +1538,18 @@ public final class HConstants {
 
   // User defined Default TTL config key
   public static final String DEFAULT_SNAPSHOT_TTL_CONFIG_KEY = "hbase.master.snapshot.ttl";
+
+  // Soft drop for destructive table actions configuration
+  public static final String SNAPSHOT_BEFORE_DESTRUCTIVE_ACTION_ENABLED_KEY =
+    "hbase.snapshot.before.destructive.action.enabled";
+  public static final boolean DEFAULT_SNAPSHOT_BEFORE_DESTRUCTIVE_ACTION_ENABLED = false;
+
+  public static final String SNAPSHOT_BEFORE_DESTRUCTIVE_ACTION_TTL_KEY =
+    "hbase.snapshot.before.destructive.action.ttl";
+  public static final long DEFAULT_SNAPSHOT_BEFORE_DESTRUCTIVE_ACTION_TTL = 86400; // 1 day
+
+  // Table-level attribute name for recovery snapshot TTL override
+  public static final String TABLE_RECOVERY_SNAPSHOT_TTL_KEY = "RECOVERY_SNAPSHOT_TTL";
 
   // Regions Recovery based on high storeFileRefCount threshold value
   public static final String STORE_FILE_REF_COUNT_THRESHOLD =

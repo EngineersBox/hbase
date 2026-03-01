@@ -48,11 +48,14 @@ import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.io.hfile.HFile;
+import org.apache.hadoop.hbase.mapreduce.HFileOutputFormat2;
 import org.apache.hadoop.hbase.mapreduce.WALPlayer;
 import org.apache.hadoop.hbase.snapshot.SnapshotDescriptionUtils;
 import org.apache.hadoop.hbase.snapshot.SnapshotManifest;
 import org.apache.hadoop.hbase.snapshot.SnapshotRegionLocator;
+import org.apache.hadoop.hbase.snapshot.SnapshotTTLExpiredException;
 import org.apache.hadoop.hbase.util.CommonFSUtils;
+import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.HFileArchiveUtil;
 import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
 import org.apache.hadoop.util.Tool;
@@ -62,6 +65,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos;
 
 /**
@@ -196,6 +200,9 @@ public class IncrementalTableBackupClient extends TableBackupClient {
         int numActiveFiles = activeFiles.size();
         updateFileLists(activeFiles, archiveFiles);
         if (activeFiles.size() < numActiveFiles) {
+          // We've archived some files, delete bulkloads directory
+          // and re-try
+          deleteBulkLoadDirectory();
           continue;
         }
 
@@ -238,7 +245,7 @@ public class IncrementalTableBackupClient extends TableBackupClient {
     incrementalCopyBulkloadHFiles(tgtFs, tn);
   }
 
-  private void updateFileLists(List<String> activeFiles, List<String> archiveFiles)
+  public void updateFileLists(List<String> activeFiles, List<String> archiveFiles)
     throws IOException {
     List<String> newlyArchived = new ArrayList<>();
 
@@ -248,9 +255,23 @@ public class IncrementalTableBackupClient extends TableBackupClient {
       }
     }
 
-    if (newlyArchived.size() > 0) {
+    if (!newlyArchived.isEmpty()) {
+      String rootDir = CommonFSUtils.getRootDir(conf).toString();
+
       activeFiles.removeAll(newlyArchived);
-      archiveFiles.addAll(newlyArchived);
+      for (String file : newlyArchived) {
+        String archivedFile = file.substring(rootDir.length() + 1);
+        Path archivedFilePath = new Path(HFileArchiveUtil.getArchivePath(conf), archivedFile);
+        archivedFile = archivedFilePath.toString();
+
+        if (!fs.exists(archivedFilePath)) {
+          throw new IOException(String.format(
+            "File %s no longer exists, and no archived file %s exists for it", file, archivedFile));
+        }
+
+        LOG.debug("Archived file {} has been updated", archivedFile);
+        archiveFiles.add(archivedFile);
+      }
     }
 
     LOG.debug(newlyArchived.size() + " files have been archived.");
@@ -331,6 +352,7 @@ public class IncrementalTableBackupClient extends TableBackupClient {
   }
 
   protected void incrementalCopyHFiles(String[] files, String backupDest) throws IOException {
+    boolean diskBasedSortingOriginalValue = HFileOutputFormat2.diskBasedSortingEnabled(conf);
     try {
       LOG.debug("Incremental copy HFiles is starting. dest=" + backupDest);
       // set overall backup phase: incremental_copy
@@ -345,6 +367,7 @@ public class IncrementalTableBackupClient extends TableBackupClient {
         LOG.debug("Setting incremental copy HFiles job name to : " + jobname);
       }
       conf.set(JOB_NAME_CONF_KEY, jobname);
+      conf.setBoolean(HFileOutputFormat2.DISK_BASED_SORTING_ENABLED_KEY, true);
 
       BackupCopyJob copyService = BackupRestoreFactory.getBackupCopyJob(conf);
       int res = copyService.copy(backupInfo, backupManager, conf, BackupType.INCREMENTAL, strArr);
@@ -357,6 +380,8 @@ public class IncrementalTableBackupClient extends TableBackupClient {
         + " finished.");
     } finally {
       deleteBulkLoadDirectory();
+      conf.setBoolean(HFileOutputFormat2.DISK_BASED_SORTING_ENABLED_KEY,
+        diskBasedSortingOriginalValue);
     }
   }
 
@@ -410,6 +435,9 @@ public class IncrementalTableBackupClient extends TableBackupClient {
     conf.set(WALPlayer.INPUT_FILES_SEPARATOR_KEY, ";");
     conf.setBoolean(WALPlayer.MULTI_TABLES_SUPPORT, true);
     conf.set(JOB_NAME_CONF_KEY, jobname);
+
+    boolean diskBasedSortingEnabledOriginalValue = HFileOutputFormat2.diskBasedSortingEnabled(conf);
+    conf.setBoolean(HFileOutputFormat2.DISK_BASED_SORTING_ENABLED_KEY, true);
     String[] playerArgs = { dirs, StringUtils.join(tableList, ",") };
 
     try {
@@ -418,13 +446,16 @@ public class IncrementalTableBackupClient extends TableBackupClient {
       if (result != 0) {
         throw new IOException("WAL Player failed");
       }
-      conf.unset(WALPlayer.INPUT_FILES_SEPARATOR_KEY);
-      conf.unset(JOB_NAME_CONF_KEY);
     } catch (IOException e) {
       throw e;
     } catch (Exception ee) {
       throw new IOException("Can not convert from directory " + dirs
         + " (check Hadoop, HBase and WALPlayer M/R job logs) ", ee);
+    } finally {
+      conf.setBoolean(HFileOutputFormat2.DISK_BASED_SORTING_ENABLED_KEY,
+        diskBasedSortingEnabledOriginalValue);
+      conf.unset(WALPlayer.INPUT_FILES_SEPARATOR_KEY);
+      conf.unset(JOB_NAME_CONF_KEY);
     }
   }
 
@@ -539,6 +570,13 @@ public class IncrementalTableBackupClient extends TableBackupClient {
           SnapshotDescriptionUtils.readSnapshotInfo(fs, manifestDir);
         SnapshotManifest manifest =
           SnapshotManifest.open(conf, fs, manifestDir, snapshotDescription);
+        if (
+          SnapshotDescriptionUtils.isExpiredSnapshot(snapshotDescription.getTtl(),
+            snapshotDescription.getCreationTime(), EnvironmentEdgeManager.currentTime())
+        ) {
+          throw new SnapshotTTLExpiredException(
+            ProtobufUtil.createSnapshotDesc(snapshotDescription));
+        }
 
         ColumnFamilyDescriptor[] backupCfs = manifest.getTableDescriptor().getColumnFamilies();
         if (!areCfsCompatible(currentCfs, backupCfs)) {
