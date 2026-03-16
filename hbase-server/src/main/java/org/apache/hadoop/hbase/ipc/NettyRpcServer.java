@@ -218,25 +218,31 @@ public class NettyRpcServer extends RpcServer {
     }
     initReconfigurable(conf);
     try (final TransparentPointerScope tempScope = new TransparentPointerScope()) {
-      final SchedulerIDOrKairosResult result = tempScope.attachTransparent(schedulerProvider.withBootstrapFn(OptionalUtils.someSchedulerBootstrapFn(
-        tempScope.attachTransparent(tempScope.attachTransparent(new SchedulerBootstrapCallback(null) {
-          @Override
-          public OptionalGenericError bootstrap(final SchedulerPluginArcBox schedulerPluginArcBox,
-            final Pointer ctx) {
-            if (!schedulerProvider.isInstanceScheduler) {
-              return OptionalUtils.noneGenericError();
-            }
-            final RpcScheduler scheduler = schedulerPluginArcBox.container().instance().instance().getPointer(RpcScheduler.class);
-            scheduler.init(new RpcSchedulerContext(NettyRpcServer.this));
-            if (schedulerProvider.shouldRegisterConfigurationObserver
-              && scheduler instanceof ConfigurationObserver) {
-              NettyRpcServer.this.registeredObservers.add((ConfigurationObserver) scheduler);
-            }
+      final SchedulerBootstrapCallback callback = tempScope.attachTransparent(new SchedulerBootstrapCallback(null) {
+        @Override
+        public OptionalGenericError bootstrap(final SchedulerPluginArcBox schedulerPluginArcBox,
+          final Pointer ctx) {
+          if (!schedulerProvider.isInstanceScheduler) {
             return OptionalUtils.noneGenericError();
           }
-        }).intoBootstrapCallback()),
-        tempScope
-      )).provide());
+          final RpcScheduler scheduler = schedulerPluginArcBox.container()
+            .instance()
+            .instance()
+            .getPointer(RpcScheduler.class);
+          scheduler.init(new RpcSchedulerContext(NettyRpcServer.this));
+          if (schedulerProvider.shouldRegisterConfigurationObserver
+            && scheduler instanceof ConfigurationObserver) {
+            NettyRpcServer.this.registeredObservers.add((ConfigurationObserver) scheduler);
+          }
+          return OptionalUtils.noneGenericError();
+        }
+      });
+      final SchedulerIDOrKairosResult result = tempScope.attachTransparent(schedulerProvider.withBootstrapFn(
+        OptionalUtils.someSchedulerBootstrapFn(
+          tempScope.attachTransparent(callback.intoBootstrapCallback()),
+          tempScope
+        )
+      ).provide());
       if (result.tag().intern() == Kairos.SchedulerIDOrKairosResultTag.Err_SchedulerID__KairosResult) {
         throw new RuntimeException("Failed to create scheduler: " + result.err().name());
       }
@@ -381,7 +387,14 @@ public class NettyRpcServer extends RpcServer {
     }
     this.authManager = new ServiceAuthorizationManager();
     HBasePolicyProvider.init(conf, authManager);
-    Kairos.startScheduler(Scheduling.KAIROS, this.schedulerID);
+    final Kairos.KairosResult result = Kairos.startScheduler(Scheduling.KAIROS, this.schedulerID).intern();
+    if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
+      throw new RuntimeException(String.format(
+        "Failed to start scheduler %d: %s",
+        this.schedulerID,
+        result.name()
+      ));
+    }
     started = true;
   }
 
@@ -405,7 +418,14 @@ public class NettyRpcServer extends RpcServer {
     }
     allChannels.close().awaitUninterruptibly();
     serverChannel.close();
-    Kairos.stopScheduler(Scheduling.KAIROS, this.schedulerID);
+    final Kairos.KairosResult result = Kairos.stopScheduler(Scheduling.KAIROS, this.schedulerID).intern();
+    if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
+      throw new RuntimeException(String.format(
+        "Failed to stop scheduler %d: %s",
+        this.schedulerID,
+        result.name()
+      ));
+    }
     closed.countDown();
     running = false;
   }

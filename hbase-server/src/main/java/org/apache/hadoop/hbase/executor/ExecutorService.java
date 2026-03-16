@@ -20,7 +20,6 @@ package org.apache.hadoop.hbase.executor;
 import java.io.IOException;
 import java.io.Writer;
 import java.lang.management.ThreadInfo;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -32,18 +31,23 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import com.engineersbox.kairos.DataBrokerBootstrapFn;
-import com.engineersbox.kairos.DataBrokerPlugin;
+import com.engineersbox.kairos.DataBrokerBootstrapCallback;
 import com.engineersbox.kairos.DataBrokerPluginArcBox;
 import com.engineersbox.kairos.DataPublisherBox;
 import com.engineersbox.kairos.DylibSpecifier;
 import com.engineersbox.kairos.Kairos;
+import com.engineersbox.kairos.Operation;
+import com.engineersbox.kairos.OperationMetadataOrKairosResult;
+import com.engineersbox.kairos.OperationRunnable;
+import com.engineersbox.kairos.OperationRunnableBox;
+import com.engineersbox.kairos.OperationRunnableContainer;
 import com.engineersbox.kairos.OptionalGenericError;
+import com.engineersbox.kairos.OptionalSliceOperationID;
+import com.engineersbox.kairos.OptionalSliceWorkerID;
+import com.engineersbox.kairos.OptionalWorkerGroupError;
+import com.engineersbox.kairos.SchedulerIDOrKairosResult;
 import com.engineersbox.kairos.SliceU8;
-import com.engineersbox.kairos.Task;
-import com.engineersbox.kairos.TaskRunnable;
-import com.engineersbox.kairos.TaskRunnableBox;
-import com.engineersbox.kairos.TaskRunnableContainer;
+import com.engineersbox.kairos.UsizeOrWorkerGroupError;
 import com.engineersbox.kairos.WorkerGroup;
 import com.engineersbox.kairos.WorkerGroupBox;
 import com.engineersbox.kairos.WorkerGroupContainer;
@@ -55,13 +59,13 @@ import com.engineersbox.kairos.conversion.IntoBox;
 import com.engineersbox.kairos.logging.SLF4JLoggerDrain;
 import com.engineersbox.kairos.scope.ManagedPointerGroup;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
+import com.engineersbox.kairos.utils.OperationUtils;
 import com.engineersbox.kairos.utils.OptionalUtils;
+import com.engineersbox.kairos.utils.ResultUtils;
 import com.engineersbox.kairos.utils.SliceUtils;
-import com.engineersbox.kairos.utils.TaskUtils;
 import org.apache.hadoop.hbase.monitoring.ThreadMonitoring;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.yetus.audience.InterfaceAudience;
-import org.bytedeco.javacpp.BytePointer;
 import org.bytedeco.javacpp.LongPointer;
 import org.bytedeco.javacpp.Pointer;
 import org.slf4j.Logger;
@@ -300,6 +304,7 @@ public class ExecutorService {
     final BlockingQueue<Runnable> q = new LinkedBlockingQueue<>();
     private final ConcurrentMap<String, DataPublisherBox> publishers;
     private final String name;
+    private long schedulerID;
     private final SliceU8 sliceName;
     private final long id;
     private final TransparentPointerScope scope;
@@ -309,6 +314,7 @@ public class ExecutorService {
       this.scope = new TransparentPointerScope();
       this.name = config.getName();
       this.sliceName = SliceUtils.fromString(this.name, this.scope);
+      this.schedulerID = 0;
       this.publishers = new ConcurrentHashMap<>();
       // create the thread pool executor
       this.threadPoolExecutor = new TrackingThreadPoolExecutor(
@@ -333,9 +339,9 @@ public class ExecutorService {
       // FIXME: This data broker name cannot be global as each thread pool gets its own.
       //        Find a better way of naming these
       brokerDylib.name(SliceUtils.fromString(this.name + "_" + DATA_BROKER_NAME, this.scope));
-      final DataBrokerBootstrapFn bootstrapFn = this.scope.attachTransparent(new DataBrokerBootstrapFn() {
+      final DataBrokerBootstrapCallback callback = this.scope.attachTransparent(new DataBrokerBootstrapCallback(null) {
         @Override
-        public OptionalGenericError call(final DataBrokerPluginArcBox plugin) {
+        public OptionalGenericError bootstrap(final DataBrokerPluginArcBox plugin, final Pointer ctx) {
           final DataPublisherBox publisher = scope.attachTransparent(new DataPublisherBox());
           final SliceU8 topic = SliceUtils.fromString(name, scope);
           final int result = plugin.vtbl_databroker().publisher().call(
@@ -344,7 +350,7 @@ public class ExecutorService {
             publisher
           );
           if (result == Kairos.GenericError.GENERIC_ERROR_FAILED.value) {
-            return OptionalUtils.someGenericError(Kairos.GenericError.GENERIC_ERROR_FAILED, scope);
+            return OptionalUtils.someGenericError(Kairos.GenericError.GENERIC_ERROR_FAILED);
           }
           publishers.put(
             Executor.this.name + "_" + DATA_BROKER_NAME,
@@ -359,8 +365,11 @@ public class ExecutorService {
         Scheduling.KAIROS,
         brokerDylib,
         scope.attachTransparent(properties.intoBox()),
-        Kairos.newDummyLoggerDrain(),
-        bootstrapFn
+        Kairos.newNoopLoggerDrain(),
+        this.scope.attachTransparent(OptionalUtils.someDataBrokerBootstrapFn(
+          callback.intoBootstrapCallback(),
+          this.scope
+        ))
       ).intern();
       if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
         LOG.error("Failed to register data broker: {}", result.name());
@@ -375,14 +384,25 @@ public class ExecutorService {
         schedulerDylib.instanceName(this.sliceName);
         schedulerDylib.libType(Kairos.LibNameType.LIB_NAME_TYPE_NAME);
         schedulerDylib.name(SliceUtils.fromString(schedulerLibName, tempScope));
-        final Kairos.KairosResult result =
-          Kairos.createSchedulerDylib(Scheduling.KAIROS, schedulerDylib, this.scope.attachTransparent(
-              new TrackingThreadPoolProvider(this.scope, this.threadPoolExecutor).intoBox()),
-            this.scope.attachTransparent(new SLF4JLoggerDrain(this.toString()).intoBox())).intern();
-        if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
-          LOG.error("Failed to run scheduler: {}", result.name());
-          throw new IllegalStateException("Failed to run scheduler: " + result.name());
+        final SchedulerIDOrKairosResult result = Kairos.createSchedulerDylib(
+          Scheduling.KAIROS,
+          schedulerDylib,
+          this.scope.attachTransparent(
+            new TrackingThreadPoolProvider(
+              this.scope,
+              this.threadPoolExecutor
+            ).intoBox()
+          ),
+          this.scope.attachTransparent(
+            this.scope.attachTransparent(new SLF4JLoggerDrain(this.toString())).intoBox()
+          ),
+          OptionalUtils.noneSchedulerBootstrapFn()
+        );
+        if (result.tag().intern() != Kairos.SchedulerIDOrKairosResultTag.Err_SchedulerID__KairosResult) {
+          LOG.error("Failed to run scheduler: {}", result.err().name());
+          throw new IllegalStateException("Failed to run scheduler: " + result.err().name());
         }
+        this.schedulerID = result.ok();
         LOG.info("Started scheduler {} with library {}", this.name, schedulerLibName);
       }
     }
@@ -392,30 +412,31 @@ public class ExecutorService {
      */
     void submit(final EventHandler event) {
       final ManagedPointerGroup pointerGroup = this.scope.createManagedPointerGroup();
-      final TaskRunnable taskRunnable = pointerGroup.attachTransparent(new TaskRunnable() {
+      final OperationRunnable taskRunnable = pointerGroup.attachTransparent(new OperationRunnable() {
+
         @Override
-        public void run(final TaskRunnableContainer cont, final Pointer context) {
+        public void run(final OperationRunnableContainer cont, final Pointer ctx, final long operationID) {
           // If there is a listener for this type, make sure we call the before
           // and after process methods.
           event.run();
           pointerGroup.close();
         }
       });
-      final Task task = TaskUtils.create(
-        (int) event.getSeqid(),
+      final Operation task = OperationUtils.create(
+        Kairos.OperationKind.Write,
         null,
         taskRunnable,
         pointerGroup
       );
-      final Kairos.KairosResult result = Kairos.submit(
+      final OperationMetadataOrKairosResult result = Kairos.submit(
         Scheduling.KAIROS,
-        this.sliceName,
+        this.schedulerID,
         task
-      ).intern();
-      if (result != Kairos.KairosResult.KAIROS_RESULT_SUCCESS) {
-        LOG.error("Failed to submit task: {}", result.name());
+      );
+      if (result.tag().intern() != Kairos.OperationMetadataOrKairosResultTag.Err_OperationMetadata__KairosResult) {
+        LOG.error("Failed to submit task: {}", result.err().name());
         pointerGroup.close();
-        throw new IllegalStateException("Failed to submit task: " + result.name());
+        throw new IllegalStateException("Failed to submit task: " + result.err().name());
       }
     }
 
@@ -515,16 +536,94 @@ public class ExecutorService {
       final WorkerGroupBox workerGroupBox) {
       final WorkerGroup group = scope.attachTransparent(new WorkerGroup() {
         @Override
-        public int capabilities(WorkerGroupContainer workerGroupContainer) {
-          return Kairos.WG_CAP_ASSIGN;
+        public OptionalWorkerGroupError assign(final WorkerGroupContainer workerGroupContainer,
+          final OperationRunnableBox taskRunnableBox, final Pointer ctx, final long operationID) {
+          executor.submit(OperationUtils.intoRunnable(
+            taskRunnableBox,
+            ctx,
+            operationID
+          ));
+          return OptionalUtils.noneWorkerGroupError();
         }
 
         @Override
-        public OptionalGenericError assign(final WorkerGroupContainer workerGroupContainer,
-          final TaskRunnableBox taskRunnableBox,
-          final Pointer pointer) {
-          executor.submit(TaskUtils.intoRunnable(taskRunnableBox, pointer));
-          return OptionalUtils.noneGenericError();
+        public OptionalWorkerGroupError start(final WorkerGroupContainer cont) {
+          if (TrackingThreadPoolProvider.this.executor.isShutdown()) {
+            LOG.error("Cannot start a stopped TrackingThreadPoolExecutor");
+            return OptionalUtils.someWorkerGroupError(Kairos.WorkerGroupError.WORKER_GROUP_ERROR_FAILED);
+          }
+          return OptionalUtils.noneWorkerGroupError();
+        }
+
+        @Override
+        public OptionalWorkerGroupError stop(final WorkerGroupContainer cont) {
+          TrackingThreadPoolProvider.this.executor.shutdownNow();
+          while (!TrackingThreadPoolProvider.this.executor.isShutdown());
+          return OptionalUtils.noneWorkerGroupError();
+        }
+
+        @Override
+        public OptionalSliceWorkerID workerIDs(final WorkerGroupContainer cont) {
+          final long[] workerIDs = TrackingThreadPoolProvider.this.executor.running
+            .keySet()
+            .stream()
+            .mapToLong(Thread::getId)
+            .toArray();
+          return OptionalUtils.someSliceWorkerID(
+            SliceUtils.fromWorkerIDArray(
+              workerIDs,
+              TrackingThreadPoolProvider.this.scope
+            ),
+            TrackingThreadPoolProvider.this.scope
+          );
+        }
+
+        @Override
+        public OptionalWorkerGroupError assignDirect(final WorkerGroupContainer cont, final long workerID,
+          final OperationRunnableBox operationRunnableBox, final Pointer ctx, final long operationID) {
+          return OptionalUtils.someWorkerGroupError(Kairos.WorkerGroupError.WORKER_GROUP_ERROR_DIRECT_UNSUPPORTED);
+        }
+
+        @Override
+        public OptionalWorkerGroupError resize(final WorkerGroupContainer cont, final long size) {
+          TrackingThreadPoolProvider.this.executor.setMaximumPoolSize((int) size);
+          TrackingThreadPoolProvider.this.executor.setCorePoolSize((int) size);
+          return OptionalUtils.noneWorkerGroupError();
+        }
+
+        @Override
+        public long size(final WorkerGroupContainer cont) {
+          return TrackingThreadPoolProvider.this.executor.getCorePoolSize();
+        }
+
+        @Override
+        public void flush(final WorkerGroupContainer cont) {
+          TrackingThreadPoolProvider.this.executor.getQueue().clear();
+        }
+
+        @Override
+        public long operationCount(final WorkerGroupContainer cont) {
+          return TrackingThreadPoolProvider.this.executor.getTaskCount();
+        }
+
+        @Override
+        public UsizeOrWorkerGroupError workerOperationCount(final WorkerGroupContainer cont, final long workerID) {
+          final int operationCount = TrackingThreadPoolProvider.this.executor.getRunningTasks()
+            .entrySet()
+            .stream()
+            .filter(entry -> entry.getKey().getId() == workerID)
+            .map((entry) -> entry.getValue() == null ? 0 : 1)
+            .findFirst()
+            .orElse(0);
+          return ResultUtils.okUsize(
+            operationCount,
+            TrackingThreadPoolProvider.this.scope
+          );
+        }
+
+        @Override
+        public OptionalSliceOperationID workerOperationIds(final WorkerGroupContainer cont, final long workerID) {
+          return OptionalUtils.noneSliceOperationID();
         }
       });
       group.saturateBox(workerGroupBox);

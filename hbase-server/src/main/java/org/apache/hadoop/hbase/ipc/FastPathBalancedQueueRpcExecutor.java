@@ -32,7 +32,7 @@ import com.engineersbox.kairos.Operation;
 import com.engineersbox.kairos.scope.TransparentPointerScope;
 import com.engineersbox.kairos.utils.OptionalUtils;
 import com.engineersbox.kairos.utils.SliceUtils;
-import com.google.common.base.Strings;
+import org.apache.hbase.thirdparty.com.google.common.base.Strings;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.executor.Scheduling;

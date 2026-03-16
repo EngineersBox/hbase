@@ -448,7 +448,7 @@ public class MasterRpcServices extends RSRpcServices
                                                                                         // bindAddress
                                                                                         // for this
                                                                                         // server.
-        conf, rpcSchedulerFactory.create(conf, this, server), reservoirEnabled);
+        conf, rpcSchedulerFactory.create(name, conf, this, server), reservoirEnabled);
     } catch (BindException be) {
       throw new IOException(be.getMessage() + ". To switch ports use the '" + HConstants.MASTER_PORT
         + "' configuration property.", be.getCause() != null ? be.getCause() : be);

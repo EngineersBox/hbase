@@ -4165,6 +4165,10 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
     return responseBuilder.addAllCachedFiles(fullyCachedFiles).build();
   }
 
+  public long getRpcSchedulerID() {
+    return this.rpcServer.getSchedulerID();
+  }
+
 //  public RpcScheduler getRpcScheduler() {
 //    return rpcServer.getScheduler();
 //  }
